@@ -53,13 +53,19 @@ def _trace_node(nodes, parent, depth, kind, san="", score=None, alpha=None, beta
     return node_id
 
 
-def _search(board, depth, algorithm, progress=None):
+def _search(board, depth, algorithm, progress=None, on_node=None):
     nodes, edges = [], []
     counters = {"visited": 1, "evaluated": 0, "cutoffs": 0, "pruned_moves": 0}
+    visualization_pause = [0.0]
     root = _trace_node(nodes, None, 0, "root", "ROOT")
     alpha_beta = algorithm == "alpha_beta"
 
-    def visit(d, alpha, beta, parent_id, ply):
+    def visit(d, alpha, beta, parent_id, ply, path):
+        if on_node:
+            callback_started = time.perf_counter()
+            on_node(board.fen(), path, len(path), alpha, beta, counters["visited"],
+                    counters["evaluated"], counters["cutoffs"], counters["pruned_moves"])
+            visualization_pause[0] += time.perf_counter() - callback_started
         if progress and (len(nodes) & 255) == 0:
             progress(counters["visited"], counters["evaluated"], counters["cutoffs"], counters["pruned_moves"])
         if d == 0 or board.is_game_over(claim_draw=True):
@@ -87,7 +93,7 @@ def _search(board, depth, algorithm, progress=None):
             edges.append((parent_id, child))
             board.push(move)
             try:
-                value = visit(d - 1, alpha, beta, child, ply + 1)
+                value = visit(d - 1, alpha, beta, child, ply + 1, path + (move.uci(),))
             finally:
                 board.pop()
             nodes[child]["score"] = value
@@ -135,7 +141,7 @@ def _search(board, depth, algorithm, progress=None):
             edges.append((root, child))
             board.push(move)
             try:
-                value = visit(depth - 1, alpha, beta, child, 2)
+                value = visit(depth - 1, alpha, beta, child, 2, (move.uci(),))
             finally:
                 board.pop()
             nodes[child]["score"] = value
@@ -158,7 +164,7 @@ def _search(board, depth, algorithm, progress=None):
                         counters["pruned_moves"] += 1
                     break
     nodes[root]["score"] = best_score
-    elapsed = time.perf_counter() - start
+    elapsed = max(0.0, time.perf_counter() - start - visualization_pause[0])
     return {"algorithm": algorithm, "best_move": best_move.uci() if best_move else None,
             "best_move_san": board.san(best_move) if best_move else "—",
             "best_score": int(best_score),
@@ -203,7 +209,7 @@ class SearchCancelled(Exception):
     """Raised by a progress callback to stop an in-flight custom search."""
 
 
-def search_position(position: chess.Board, depth: int, algorithm: str, progress=None):
+def search_position(position: chess.Board, depth: int, algorithm: str, progress=None, on_node=None):
     """Run one algorithm on a copied position; progress receives actual search counters."""
     if not isinstance(depth, int) or depth < 1 or depth > 4:
         raise ValueError("Depth must be an integer between 1 and 4.")
@@ -212,7 +218,9 @@ def search_position(position: chess.Board, depth: int, algorithm: str, progress=
     board = position.copy(stack=True)
     if progress:
         progress(0, 0, 0, 0)
-    return _search(board, depth, algorithm, progress=progress)
+    if on_node:
+        on_node(board.fen(), (), 0, -float("inf"), float("inf"), 0, 0, 0, 0)
+    return _search(board, depth, algorithm, progress=progress, on_node=on_node)
 
 
 def parse_fen(fen: str) -> chess.Board:

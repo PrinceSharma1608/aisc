@@ -54,12 +54,17 @@ history_scroll = 0
 engine_thread = None
 comparison_view = "dashboard"
 match_boards = {"minimax": chess.Board(), "alpha_beta": chess.Board()}
+match_game_board = chess.Board()
 match_stats = {}
 match_running = False
-match_message = "Ready to play two parallel games from the selected position."
+match_message = "Ready to visualize the actual Minimax and Alpha-Beta search paths."
+match_active_algorithm = None
+match_cursor_bounds = {"minimax": (None, None), "alpha_beta": (None, None)}
 match_queue = queue.Queue()
 match_thread = None
 match_cancel = None
+match_pending_ack = None
+match_ack_release_at = 0.0
 PIECE_GLYPHS = {
     (chess.WHITE, chess.KING): "♔", (chess.WHITE, chess.QUEEN): "♕", (chess.WHITE, chess.ROOK): "♖",
     (chess.WHITE, chess.BISHOP): "♗", (chess.WHITE, chess.KNIGHT): "♘", (chess.WHITE, chess.PAWN): "♙",
@@ -148,41 +153,43 @@ def start_comparison():
 
 
 def start_parallel_games():
-    global match_running, match_message, match_boards, match_stats, match_cancel, match_thread, comparison_view
+    global match_running, match_message, match_boards, match_game_board, match_stats, match_cancel, match_thread, comparison_view, match_active_algorithm
     if match_running or busy:
         return
     comparison_view = "match"
-    match_boards = {"minimax": comparison_board.copy(stack=True),
-                    "alpha_beta": comparison_board.copy(stack=True)}
+    match_game_board = comparison_board.copy(stack=True)
+    match_boards = {"minimax": match_game_board.copy(stack=True),
+                    "alpha_beta": match_game_board.copy(stack=True)}
     match_stats = {
         key: {"nodes_visited": 0, "leaf_nodes_evaluated": 0, "cutoffs": 0,
               "pruned_moves": 0, "elapsed": 0.0, "current": (0, 0, 0, 0, 0.0),
               "moves": 0, "last_move": "—", "last_score": None}
         for key in ("minimax", "alpha_beta")
     }
+    match_cursor_bounds.update({"minimax": (None, None), "alpha_beta": (None, None)})
+    match_active_algorithm = None
     match_cancel = threading.Event()
     cancel_event = match_cancel
     depth_snapshot = search_depth
     match_running = True
-    match_message = f"Both games starting at depth {depth_snapshot}. Each algorithm controls both colors in its own game."
+    match_message = f"Starting shared game at depth {depth_snapshot}. Both algorithms search each same position."
 
     def task():
-        local_boards = {key: board.copy(stack=True) for key, board in match_boards.items()}
+        game = comparison_board.copy(stack=True)
         try:
-            active = set(local_boards)
-            while active:
+            while not game.is_game_over(claim_draw=True):
+                if cancel_event.is_set():
+                    raise SearchCancelled()
+                root = game.copy(stack=True)
+                root_fen = root.fen()
+                results = {}
+                match_queue.put(("turn_start", (root_fen, root.ply())))
                 for key in ("minimax", "alpha_beta"):
-                    if key not in active:
-                        continue
                     if cancel_event.is_set():
                         raise SearchCancelled()
-                    board = local_boards[key]
-                    if board.is_game_over(claim_draw=True):
-                        match_queue.put(("game_end", (key, board.result(claim_draw=True),
-                                                       board.outcome(claim_draw=True).termination.name)))
-                        active.remove(key)
-                        continue
+                    match_queue.put(("search_started", (key, root_fen)))
                     started = time.perf_counter()
+                    last_cursor_at = [0.0]
 
                     def progress(visited, leaves, cutoffs, pruned):
                         if cancel_event.is_set():
@@ -190,21 +197,38 @@ def start_parallel_games():
                         match_queue.put(("match_progress", (key, visited, leaves, cutoffs,
                                                              pruned, time.perf_counter() - started)))
 
-                    result = search_position(board, depth_snapshot, key, progress=progress)
+                    def on_node(fen, path, ply, alpha, beta, visited, leaves, cutoffs, pruned):
+                        if cancel_event.is_set():
+                            raise SearchCancelled()
+                        now = time.perf_counter()
+                        if len(path) <= 1 or now - last_cursor_at[0] >= 0.06:
+                            last_cursor_at[0] = now
+                            acknowledgement = threading.Event()
+                            match_queue.put(("match_cursor", (key, root_fen, path, ply, alpha, beta,
+                                visited, leaves, cutoffs, pruned, now - started, acknowledgement)))
+                            while not acknowledgement.wait(0.05):
+                                if cancel_event.is_set():
+                                    raise SearchCancelled()
+
+                    result = search_position(root, depth_snapshot, key, progress=progress, on_node=on_node)
                     if cancel_event.is_set():
                         raise SearchCancelled()
-                    if result["best_move"] is None:
-                        active.remove(key)
-                        match_queue.put(("game_end", (key, board.result(claim_draw=True),
-                                                       board.outcome(claim_draw=True).termination.name)))
-                        continue
-                    move = chess.Move.from_uci(result["best_move"])
-                    san = board.san(move)
-                    board.push(move)
-                    summary = {name: result[name] for name in
-                               ("nodes_visited", "leaf_nodes_evaluated", "cutoffs", "pruned_moves", "elapsed", "best_score")}
-                    match_queue.put(("match_move", (key, move.uci(), san, summary)))
-            match_queue.put(("match_done", None))
+                    results[key] = result
+                    match_queue.put(("search_done", (key, result["best_move"], result["best_move_san"],
+                        {name: result[name] for name in
+                         ("nodes_visited", "leaf_nodes_evaluated", "cutoffs", "pruned_moves", "elapsed", "best_score")})))
+                minimax_result, alpha_result = results["minimax"], results["alpha_beta"]
+                if minimax_result["best_score"] != alpha_result["best_score"]:
+                    raise RuntimeError("Minimax and Alpha-Beta scores disagreed; game stopped for integrity.")
+                if minimax_result["best_move"] is None:
+                    break
+                move = chess.Move.from_uci(minimax_result["best_move"])
+                san = game.san(move)
+                game.push(move)
+                match_queue.put(("game_move", (move.uci(), san, game.fen(), game.ply())))
+            outcome = game.outcome(claim_draw=True)
+            match_queue.put(("match_done", (game.result(claim_draw=True),
+                                               outcome.termination.name if outcome else "unknown")))
         except SearchCancelled:
             match_queue.put(("match_cancelled", None))
         except Exception as exc:
@@ -222,16 +246,19 @@ def stop_parallel_games():
 
 
 def reset_parallel_games():
-    global match_boards, match_stats, match_message
-    match_boards = {"minimax": comparison_board.copy(stack=True),
-                    "alpha_beta": comparison_board.copy(stack=True)}
+    global match_boards, match_game_board, match_stats, match_message, match_active_algorithm
+    match_game_board = comparison_board.copy(stack=True)
+    match_boards = {"minimax": match_game_board.copy(stack=True),
+                    "alpha_beta": match_game_board.copy(stack=True)}
     match_stats = {
         key: {"nodes_visited": 0, "leaf_nodes_evaluated": 0, "cutoffs": 0,
               "pruned_moves": 0, "elapsed": 0.0, "current": (0, 0, 0, 0, 0.0),
               "moves": 0, "last_move": "—", "last_score": None}
         for key in ("minimax", "alpha_beta")
     }
-    match_message = "Both game boards reset to the selected starting position."
+    match_message = "Shared game and both search cursors reset to the selected starting position."
+    match_active_algorithm = None
+    match_cursor_bounds.update({"minimax": (None, None), "alpha_beta": (None, None)})
 
 
 def fit(value, font, max_width):
@@ -357,7 +384,7 @@ def draw():
     draw_text(screen, "CHESS ARENA", margin, 14, TITLE)
     draw_text(screen, "Algorithm Visualization Lab  •  Plain Minimax vs Alpha-Beta Pruning", margin + 2, 48, SMALL, MUTED)
     button("match", pygame.Rect(w - 330, 18, 150, 35),
-           "Games live" if match_running else "Play full games", active=match_running,
+           "View live search" if match_running else "Visualize game", active=match_running,
            enabled=match_running or not busy)
     if match_running:
         button("stop_match", pygame.Rect(w - 495, 18, 150, 35), "Stop games", enabled=True)
@@ -487,24 +514,31 @@ def draw_play_screen(w, h):
 def draw_match_screen(w, h):
     global buttons
     buttons = {}
-    draw_text(screen, "PARALLEL SELF-PLAY", 22, 15, TITLE)
-    draw_text(screen, f"Depth {search_depth} • same start position • each algorithm plays both colors; totals accumulate across move searches",
+    draw_text(screen, "LIVE MINIMAX SEARCH PLAYBACK", 22, 15, TITLE)
+    draw_text(screen, f"Depth {search_depth} • both algorithms search the same game position; each board follows its actual recursive branch",
               24, 49, SMALL, MUTED)
     button("dashboard", pygame.Rect(w - 495, 18, 150, 35), "Analysis dashboard")
-    button("match_reset", pygame.Rect(w - 660, 18, 150, 35), "Reset games", enabled=not match_running)
+    button("match_reset", pygame.Rect(w - 660, 18, 150, 35), "Reset game", enabled=not match_running)
     button("match_stop", pygame.Rect(w - 330, 18, 145, 35), "Stop games" if match_running else "Games stopped",
            active=match_running, enabled=match_running)
     button("match_menu", pygame.Rect(w - 165, 18, 145, 35), "Return to Menu", enabled=not match_running)
-    draw_text(screen, match_message, 24, 75, SMALL, GOLD if match_running else GREEN)
-    margin, gap, top = 20, 16, 105
+    game_turn = "White" if match_game_board.turn else "Black"
+    game_history = san_history(match_game_board)
+    last_game_moves = " ".join(game_history[-8:]) if game_history else "Start position"
+    draw_text(screen, f"Game ply {match_game_board.ply()} • {game_turn} to move • Game: {last_game_moves}",
+              24, 72, SMALL, GOLD)
+    draw_text(screen, match_message, 24, 91, TINY, GOLD if match_running else GREEN)
+    margin, gap, top = 20, 16, 116
     panel_w = (w - 2 * margin - gap) // 2
     panel_h = h - top - 16
-    board_size = max(160, min(450, panel_w - 230, h - 330))
+    board_size = max(160, min(450, panel_w - 230, h - 370))
     for index, (key, title, accent) in enumerate((
             ("minimax", "PLAIN MINIMAX", BLUE), ("alpha_beta", "ALPHA-BETA", GREEN))):
         panel = pygame.Rect(margin + index * (panel_w + gap), top, panel_w, panel_h)
         rounded(screen, panel, PANEL)
-        draw_text(screen, title, panel.x + 16, panel.y + 12, MED, accent)
+        is_active = match_active_algorithm == key
+        panel_title = f"{title} • SEARCHING" if is_active else title
+        draw_text(screen, panel_title, panel.x + 16, panel.y + 12, MED, PURPLE if is_active else accent)
         board_x, board_y = panel.x + 14, panel.y + 58
         draw_chessboard(match_boards[key], board_x, board_y, board_size)
         stats = match_stats.get(key, {})
@@ -512,28 +546,30 @@ def draw_match_screen(w, h):
         game = match_boards[key]
         current = stats.get("current", (0, 0, 0, 0, 0.0))
         current_nodes, current_leaves, current_cutoffs, current_pruned, current_elapsed = current
-        draw_text(screen, f"Ply: {game.ply()}", info_x, board_y + 2, FONT)
-        draw_text(screen, f"Turn: {'White' if game.turn else 'Black'}", info_x, board_y + 27, SMALL, MUTED)
+        draw_text(screen, f"Search ply: {game.ply()}", info_x, board_y + 2, FONT)
+        draw_text(screen, f"Side: {'White' if game.turn else 'Black'}", info_x, board_y + 27, SMALL, MUTED)
         if stats.get("last_move", "—") != "—":
-            draw_text(screen, f"Last: {stats['last_move']}", info_x, board_y + 54, MED, GOLD)
+            draw_text(screen, f"Best: {stats['last_move']}", info_x, board_y + 54, MED, GOLD)
             draw_text(screen, f"Score: {format_search_score(stats['last_score'])}", info_x, board_y + 80, SMALL, MUTED)
         if game.is_game_over(claim_draw=True):
             outcome = game.outcome(claim_draw=True)
             draw_text(screen, f"Finished: {game.result(claim_draw=True)}", info_x, board_y + 110, MED, GOLD)
             if outcome:
                 draw_text(screen, outcome.termination.name.replace("_", " ").title(), info_x, board_y + 136, TINY, MUTED)
-        draw_text(screen, "Cumulative", info_x, board_y + 174, SMALL, accent)
-        draw_text(screen, f"Visited nodes: {stats.get('nodes_visited', 0):,}", info_x, board_y + 198, TINY)
-        draw_text(screen, f"Leaf evaluations: {stats.get('leaf_nodes_evaluated', 0):,}", info_x, board_y + 219, TINY)
-        draw_text(screen, f"Cutoffs: {stats.get('cutoffs', 0):,}", info_x, board_y + 240, TINY)
-        draw_text(screen, f"Pruned moves: {stats.get('pruned_moves', 0):,}", info_x, board_y + 261, TINY)
-        draw_text(screen, f"Search time: {stats.get('elapsed', 0.0):.2f}s", info_x, board_y + 282, TINY)
+        alpha, beta = match_cursor_bounds.get(key, (None, None))
+        draw_text(screen, f"α: {alpha}  β: {beta}", info_x, board_y + 108, TINY, PURPLE)
+        draw_text(screen, "Cumulative over game", info_x, board_y + 144, SMALL, accent)
+        draw_text(screen, f"Visited nodes: {stats.get('nodes_visited', 0):,}", info_x, board_y + 168, TINY)
+        draw_text(screen, f"Leaf evaluations: {stats.get('leaf_nodes_evaluated', 0):,}", info_x, board_y + 189, TINY)
+        draw_text(screen, f"Cutoffs: {stats.get('cutoffs', 0):,}", info_x, board_y + 210, TINY)
+        draw_text(screen, f"Pruned moves: {stats.get('pruned_moves', 0):,}", info_x, board_y + 231, TINY)
+        draw_text(screen, f"Search time: {stats.get('elapsed', 0.0):.2f}s", info_x, board_y + 252, TINY)
         if match_running:
-            draw_text(screen, "Current search", info_x, board_y + 315, SMALL, PURPLE)
-            draw_text(screen, f"Nodes: {current_nodes:,}  Leaves: {current_leaves:,}", info_x, board_y + 337, TINY, MUTED)
-            draw_text(screen, f"Cutoffs: {current_cutoffs:,}  Skipped: {current_pruned:,}", info_x, board_y + 357, TINY, MUTED)
-            draw_text(screen, f"Elapsed: {current_elapsed:.1f}s", info_x, board_y + 377, TINY, MUTED)
-        draw_text(screen, "Recent moves", board_x, board_y + board_size + 18, SMALL, MUTED)
+            draw_text(screen, "This search (live)", info_x, board_y + 284, SMALL, PURPLE)
+            draw_text(screen, f"Nodes: {current_nodes:,}  Leaves: {current_leaves:,}", info_x, board_y + 306, TINY, MUTED)
+            draw_text(screen, f"Cutoffs: {current_cutoffs:,}  Skipped: {current_pruned:,}", info_x, board_y + 326, TINY, MUTED)
+            draw_text(screen, f"Wall time: {current_elapsed:.1f}s", info_x, board_y + 346, TINY, MUTED)
+        draw_text(screen, "Current branch (SAN)", board_x, board_y + board_size + 18, SMALL, MUTED)
         history = san_history(game)
         for row, move in enumerate(history[-8:]):
             ply_index = len(history) - min(8, len(history)) + row
@@ -559,7 +595,7 @@ def request_engine_move():
 def main():
     global search_depth, result, busy, message, mode, screen, game_board, selected_square, legal_targets, engine_busy, game_message
     global stockfish_depth, comparison_board, comparison_name, fen_editing, fen_buffer, fen_error, tree_selection, history_scroll
-    global comparison_view, match_running, match_message
+    global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_ack, match_ack_release_at
     running = True
     while running:
         for event in pygame.event.get():
@@ -729,39 +765,69 @@ def main():
                 key, visited, leaves, cutoffs, pruned, elapsed = payload
                 if key in match_stats:
                     match_stats[key]["current"] = (visited, leaves, cutoffs, pruned, elapsed)
-            elif status == "match_move":
-                key, uci, san, item = payload
-                move = chess.Move.from_uci(uci)
-                if move in match_boards[key].legal_moves:
-                    match_boards[key].push(move)
+            elif status == "search_started":
+                key, root_fen = payload
+                match_active_algorithm = key
+                match_boards[key] = chess.Board(root_fen)
+                match_cursor_bounds[key] = (None, None)
+                match_stats[key]["current"] = (0, 0, 0, 0, 0.0)
+                match_message = f"{key.replace('_', ' ').title()} is exploring this game position…"
+            elif status == "match_cursor":
+                key, root_fen, path, ply, alpha, beta, visited, leaves, cutoffs, pruned, elapsed, acknowledgement = payload
+                cursor_board = chess.Board(root_fen)
+                for uci in path:
+                    cursor_board.push_uci(uci)
+                match_boards[key] = cursor_board
+                match_active_algorithm = key
+                match_cursor_bounds[key] = (alpha, beta)
+                match_stats[key]["current"] = (visited, leaves, cutoffs, pruned, elapsed)
+                match_pending_ack = acknowledgement
+                match_ack_release_at = time.perf_counter() + 0.06
+            elif status == "search_done":
+                key, best_uci, best_san, item = payload
                 stats = match_stats[key]
                 stats["nodes_visited"] += item["nodes_visited"]
                 stats["leaf_nodes_evaluated"] += item["leaf_nodes_evaluated"]
                 stats["cutoffs"] += item["cutoffs"]
                 stats["pruned_moves"] += item["pruned_moves"]
                 stats["elapsed"] += item["elapsed"]
-                stats["moves"] += 1
-                stats["last_move"], stats["last_score"] = san, item["best_score"]
+                stats["searches"] = stats.get("searches", 0) + 1
+                stats["last_move"], stats["last_score"] = best_san, item["best_score"]
                 stats["current"] = (0, 0, 0, 0, 0.0)
-                match_message = (f"Minimax ply {match_boards['minimax'].ply()} • "
-                                 f"Alpha-Beta ply {match_boards['alpha_beta'].ply()} — live measured totals.")
-            elif status == "game_end":
-                key, outcome, termination = payload
-                match_message = f"{key.replace('_', ' ').title()} finished {outcome} ({termination.replace('_', ' ').lower()})."
+                match_message = f"{key.replace('_', ' ').title()} finished search: {best_san}, {format_search_score(item['best_score'])}."
+            elif status == "game_move":
+                uci, san, fen, ply = payload
+                move = chess.Move.from_uci(uci)
+                if move in match_game_board.legal_moves:
+                    match_game_board.push(move)
+                match_boards = {key: match_game_board.copy(stack=True) for key in ("minimax", "alpha_beta")}
+                match_active_algorithm = None
+                match_message = f"Both scores agree. Minimax's {san} advances the shared game; Alpha-Beta searches the next position."
             elif status == "match_done":
                 match_running = False
-                match_message = "Both full games reached terminal positions. Cumulative statistics are final."
+                outcome, termination = payload
+                match_boards = {key: match_game_board.copy(stack=True) for key in ("minimax", "alpha_beta")}
+                match_active_algorithm = None
+                match_message = f"Shared game ended {outcome} ({termination.replace('_', ' ').lower()}). Statistics are final."
             elif status == "match_cancelled":
                 match_running = False
+                match_active_algorithm = None
                 match_message = "Games stopped. Partial games and accumulated statistics are retained."
             elif status == "match_error":
                 match_running = False
+                match_active_algorithm = None
                 match_message = f"Game search error: {payload}"
         draw()
         pygame.display.flip()
         clock.tick(60)
+        if match_pending_ack and time.perf_counter() >= match_ack_release_at:
+            match_pending_ack.set()
+            match_pending_ack = None
     if match_running:
         stop_parallel_games()
+    if match_pending_ack:
+        match_pending_ack.set()
+        match_pending_ack = None
     if match_thread and match_thread.is_alive():
         match_thread.join()
     if engine_thread and engine_thread.is_alive():

@@ -51,6 +51,16 @@ def test_live_search_progress_and_cancel():
     assert updates and all(len(update) == 4 for update in updates)
     assert any(update[0] > 0 for update in updates)
 
+    cursor_events = []
+    search_position(board, 2, "minimax", on_node=lambda *values: cursor_events.append(values))
+    assert cursor_events and any(event[1] for event in cursor_events)
+    for fen, path, ply, *_ in cursor_events:
+        cursor = board.copy(stack=True)
+        for uci in path:
+            cursor.push_uci(uci)
+        assert cursor.fen() == fen
+        assert ply == len(path)
+
     def cancel_after_search_begins(visited, *_):
         if visited >= 100:
             raise SearchCancelled()
