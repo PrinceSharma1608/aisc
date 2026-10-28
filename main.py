@@ -260,7 +260,7 @@ def start_parallel_games():
                     "alpha_beta": match_game_board.copy(stack=True)}
     match_stats = {
         key: {"nodes_visited": 0, "leaf_nodes_evaluated": 0, "cutoffs": 0,
-              "pruned_moves": 0, "elapsed": 0.0, "current": (0, 0, 0, 0, 0.0),
+              "pruned_moves": 0, "elapsed": 0.0, "wall_time": 0.0, "current": (0, 0, 0, 0, 0.0),
               "moves": 0, "last_move": "—", "last_score": None}
         for key in ("minimax", "alpha_beta")
     }
@@ -304,7 +304,9 @@ def start_parallel_games():
                             raise SearchCancelled()
 
             try:
-                return search_position(root, depth_snapshot, key, progress=progress, on_node=on_node)
+                result = search_position(root, depth_snapshot, key, progress=progress, on_node=on_node)
+                result["wall_time"] = time.perf_counter() - started
+                return result
             except Exception:
                 cancel_event.set()
                 raise
@@ -337,7 +339,7 @@ def start_parallel_games():
                         results[key] = result
                         match_queue.put(("search_done", (key, result["best_move"], result["best_move_san"],
                             {name: result[name] for name in
-                             ("nodes_visited", "leaf_nodes_evaluated", "cutoffs", "pruned_moves", "elapsed", "best_score")})))
+                             ("nodes_visited", "leaf_nodes_evaluated", "cutoffs", "pruned_moves", "elapsed", "wall_time", "best_score")})))
                 minimax_result, alpha_result = results["minimax"], results["alpha_beta"]
                 if minimax_result["best_score"] != alpha_result["best_score"]:
                     raise RuntimeError("Minimax and Alpha-Beta scores disagreed; game stopped for integrity.")
@@ -377,7 +379,7 @@ def reset_parallel_games():
                     "alpha_beta": match_game_board.copy(stack=True)}
     match_stats = {
         key: {"nodes_visited": 0, "leaf_nodes_evaluated": 0, "cutoffs": 0,
-              "pruned_moves": 0, "elapsed": 0.0, "current": (0, 0, 0, 0, 0.0),
+              "pruned_moves": 0, "elapsed": 0.0, "wall_time": 0.0, "current": (0, 0, 0, 0, 0.0),
               "moves": 0, "last_move": "—", "last_score": None}
         for key in ("minimax", "alpha_beta")
     }
@@ -715,6 +717,17 @@ def draw_match_screen(w, h):
     panel_w = (w - 2 * margin - gap) // 2
     panel_h = h - top - 16
     board_size = max(160, min(450, panel_w - 230, h - 370))
+    metric_specs = (("nodes_visited", 0, "Nodes"), ("leaf_nodes_evaluated", 1, "Leaves"),
+                    ("cutoffs", 2, "Cutoffs"), ("pruned_moves", 3, "Pruned"))
+    metric_totals = {}
+    for stat_key, tuple_index, _label in metric_specs:
+        metric_totals[stat_key] = {
+            key: match_stats.get(key, {}).get(stat_key, 0)
+                 + match_stats.get(key, {}).get("current", (0, 0, 0, 0, 0.0))[tuple_index]
+            for key in ("minimax", "alpha_beta")
+        }
+    metric_scales = {stat_key: max(1, *values.values()) for stat_key, values in metric_totals.items()}
+    moves_taken = max(0, match_game_board.ply() - match_start_ply)
     for index, (key, title, accent) in enumerate((
             ("minimax", "PLAIN MINIMAX", BLUE), ("alpha_beta", "ALPHA-BETA", GREEN))):
         panel = pygame.Rect(margin + index * (panel_w + gap), top, panel_w, panel_h)
@@ -744,18 +757,39 @@ def draw_match_screen(w, h):
                 draw_text(screen, outcome.termination.name.replace("_", " ").title(), info_x, board_y + 136, TINY, MUTED)
         alpha, beta = match_cursor_bounds.get(key, (None, None))
         draw_text(screen, f"α: {alpha}  β: {beta}", info_x, board_y + 108, TINY, PURPLE)
-        draw_text(screen, "Cumulative over game", info_x, board_y + 144, SMALL, accent)
-        draw_text(screen, f"Visited nodes: {stats.get('nodes_visited', 0):,}", info_x, board_y + 168, TINY)
-        draw_text(screen, f"Leaf evaluations: {stats.get('leaf_nodes_evaluated', 0):,}", info_x, board_y + 189, TINY)
-        draw_text(screen, f"Cutoffs: {stats.get('cutoffs', 0):,}", info_x, board_y + 210, TINY)
-        draw_text(screen, f"Pruned moves: {stats.get('pruned_moves', 0):,}", info_x, board_y + 231, TINY)
-        draw_text(screen, f"Search time: {stats.get('elapsed', 0.0):.2f}s", info_x, board_y + 252, TINY)
+        draw_text(screen, "SEARCH STATS • LIVE TOTAL", info_x, board_y + 144, SMALL, accent)
+        info_w = max(110, panel.right - info_x - 16)
+        label_w, value_w = 48, 48
+        bar_w = max(20, info_w - label_w - value_w - 12)
+        for row, (stat_key, _tuple_index, label) in enumerate(metric_specs):
+            y = board_y + 169 + row * 22
+            value = metric_totals[stat_key][key]
+            draw_text(screen, label, info_x, y - 2, TINY, MUTED)
+            bar_rect = pygame.Rect(info_x + label_w, y + 2, bar_w, 9)
+            pygame.draw.rect(screen, PANEL2, bar_rect, border_radius=4)
+            fill_w = int(bar_w * value / metric_scales[stat_key])
+            if fill_w:
+                pygame.draw.rect(screen, accent,
+                                 pygame.Rect(bar_rect.x, bar_rect.y, max(4, fill_w), bar_rect.height),
+                                 border_radius=4)
+            draw_text(screen, f"{value:,}", bar_rect.right + 6, y - 2, TINY, TEXT)
         if match_running:
-            draw_text(screen, "This search (live)", info_x, board_y + 284, SMALL, PURPLE)
-            draw_text(screen, f"Nodes: {current_nodes:,}  Leaves: {current_leaves:,}", info_x, board_y + 306, TINY, MUTED)
-            draw_text(screen, f"Cutoffs: {current_cutoffs:,}  Skipped: {current_pruned:,}", info_x, board_y + 326, TINY, MUTED)
-            draw_text(screen, f"Wall time: {current_elapsed:.1f}s", info_x, board_y + 346, TINY, MUTED)
-        history_top = board_y + board_size + 52
+            draw_text(screen, "Current search", info_x, board_y + 262, SMALL, PURPLE)
+            draw_text(screen, f"Nodes {current_nodes:,} • leaves {current_leaves:,}", info_x, board_y + 284, TINY, MUTED)
+            draw_text(screen, f"Cutoffs {current_cutoffs:,} • pruned {current_pruned:,}", info_x, board_y + 304, TINY, MUTED)
+        live_wall_time = stats.get("wall_time", 0.0) + (current_elapsed if match_running else 0.0)
+        draw_text(screen, f"Total search wall time: {live_wall_time:.1f}s", info_x, board_y + 344,
+                  TINY, MUTED)
+        draw_text(screen, f"GAME PLIES  {moves_taken} / 24", board_x, board_y + board_size + 10,
+                  TINY, GOLD)
+        move_bar = pygame.Rect(board_x, board_y + board_size + 29, board_size, 12)
+        pygame.draw.rect(screen, PANEL2, move_bar, border_radius=5)
+        move_fill = int(move_bar.width * min(moves_taken, 24) / 24)
+        if move_fill:
+            pygame.draw.rect(screen, accent,
+                             pygame.Rect(move_bar.x, move_bar.y, max(5, move_fill), move_bar.height),
+                             border_radius=5)
+        history_top = board_y + board_size + 53
         draw_text(screen, "Current branch (SAN)", board_x, history_top, SMALL, MUTED)
         history = san_history(game)
         visible_rows = min(8, max(0, (panel.bottom - history_top - 25) // 18))
@@ -764,21 +798,6 @@ def draw_match_screen(w, h):
             label = f"{ply_index // 2 + 1}. " if ply_index % 2 == 0 else "   "
             draw_text(screen, label + move, board_x, history_top + 23 + row * 18,
                       TINY, GOLD if row == min(7, len(history) - 1) else TEXT)
-
-    board_y = top + 58
-    move_bar_y = board_y + board_size + 12
-    moves_taken = max(0, match_game_board.ply() - match_start_ply)
-    draw_text(screen, f"MOVES TAKEN  {moves_taken}", 24, move_bar_y, SMALL, GOLD)
-    bar_x, bar_width, bar_height = 205, max(120, w - 230), 18
-    pygame.draw.rect(screen, PANEL2, pygame.Rect(bar_x, move_bar_y + 1, bar_width, bar_height), border_radius=7)
-    filled_width = min(bar_width, int(bar_width * min(moves_taken, 20) / 20))
-    if filled_width:
-        pygame.draw.rect(screen, BLUE, pygame.Rect(bar_x, move_bar_y + 1, filled_width, bar_height), border_radius=7)
-    for tick in range(1, 20):
-        x = bar_x + int(bar_width * tick / 20)
-        pygame.draw.line(screen, BG, (x, move_bar_y + 3), (x, move_bar_y + bar_height - 2), 1)
-
-
 def request_engine_move():
     global engine_busy, game_message, engine_thread
     engine_busy = True
@@ -1089,6 +1108,7 @@ def main():
                 stats["cutoffs"] += item["cutoffs"]
                 stats["pruned_moves"] += item["pruned_moves"]
                 stats["elapsed"] += item["elapsed"]
+                stats["wall_time"] += item["wall_time"]
                 stats["searches"] = stats.get("searches", 0) + 1
                 stats["last_move"], stats["last_score"] = best_san, item["best_score"]
                 stats["current"] = (0, 0, 0, 0, 0.0)
