@@ -32,50 +32,56 @@ MATCH_DEPTH = 2
 
 
 def new_comparison_position():
-    """Choose a fresh, legal 7–9 piece tactical position with a mate-in-one."""
+    """Create a fresh, reachable midgame position from a randomized legal game."""
     global _comparison_position_number
-    core = ((chess.WHITE, chess.KING, chess.F6),
-            (chess.WHITE, chess.QUEEN, chess.G6),
-            (chess.BLACK, chess.KING, chess.H8))
-    optional_pieces = ((chess.WHITE, chess.ROOK), (chess.WHITE, chess.BISHOP),
-                       (chess.WHITE, chess.KNIGHT), (chess.BLACK, chess.ROOK),
-                       (chess.BLACK, chess.BISHOP), (chess.BLACK, chess.KNIGHT))
-    for _ in range(50_000):
-        flip_file, flip_rank = _position_random.choice((False, True)), _position_random.choice((False, True))
-        def transform(square):
-            file, rank = chess.square_file(square), chess.square_rank(square)
-            return chess.square(7 - file if flip_file else file, 7 - rank if flip_rank else rank)
+    for _ in range(180):
+        board = chess.Board()
+        target_pieces = _position_random.randint(10, 14)
+        for _ply in range(180):
+            if board.is_game_over(claim_draw=True):
+                break
+            piece_count = len(board.piece_map())
+            pieces_by_color = {color: sum(piece.color == color for piece in board.piece_map().values())
+                               for color in (chess.WHITE, chess.BLACK)}
+            if (piece_count <= target_pieces and board.ply() >= 24
+                    and pieces_by_color[chess.WHITE] >= 2 and pieces_by_color[chess.BLACK] >= 2
+                    and not board.is_check()):
+                # Start from a normal position, not a setup selected to force an immediate mate.
+                has_mate_in_one = False
+                for candidate in list(board.legal_moves):
+                    board.push(candidate)
+                    has_mate_in_one = board.is_checkmate()
+                    board.pop()
+                    if has_mate_in_one:
+                        break
+                key = f"{board.board_fen()} {board.turn} {board.castling_xfen()}"
+                if not has_mate_in_one and key not in _seen_comparison_positions:
+                    _seen_comparison_positions.add(key)
+                    _comparison_position_number += 1
+                    return chess.Board(board.fen()), f"Random legal midgame {_comparison_position_number}"
 
-        board = chess.Board(None)
-        occupied = set()
-        for color, piece_type, square in core:
-            square = transform(square)
-            occupied.add(square)
-            board.set_piece_at(square, chess.Piece(piece_type, color))
-        extra_count = _position_random.randint(4, 6)
-        extras = _position_random.sample(optional_pieces, extra_count)
-        squares = _position_random.sample([sq for sq in chess.SQUARES if sq not in occupied], extra_count)
-        for (color, piece_type), square in zip(extras, squares):
-            board.set_piece_at(square, chess.Piece(piece_type, color))
-        board.turn = chess.WHITE
-        board.fullmove_number = 35
-        if not board.is_valid() or board.is_check():
-            continue
-        fen = board.fen()
-        if fen in _seen_comparison_positions:
-            continue
-        for move in list(board.legal_moves):
+            legal_moves = list(board.legal_moves)
+            if not legal_moves:
+                break
+            captures = [move for move in legal_moves if board.is_capture(move)]
+            checks = [move for move in legal_moves if board.gives_check(move)]
+            if captures and _position_random.random() < 0.72:
+                move = _position_random.choice(captures)
+            elif checks and _position_random.random() < 0.20:
+                move = _position_random.choice(checks)
+            else:
+                move = _position_random.choice(legal_moves)
             board.push(move)
-            is_mate = board.is_checkmate()
-            board.pop()
-            if is_mate:
-                _seen_comparison_positions.add(fen)
-                _comparison_position_number += 1
-                return board, f"Random tactical position {_comparison_position_number}"
-    # Valid 9-piece fallback: Qg7 is mate, with the extra pieces left on the board.
-    board = chess.Board("rn5k/b7/5KQ1/8/8/8/8/RBN5 w - - 0 35")
+
+    # Rare safety fallback: a fresh legal random-play position, without a fixed FEN.
+    board = chess.Board()
+    for _ in range(24):
+        legal_moves = list(board.legal_moves)
+        if not legal_moves or board.is_game_over(claim_draw=True):
+            break
+        board.push(_position_random.choice(legal_moves))
     _comparison_position_number += 1
-    return board, f"Tactical position {_comparison_position_number}"
+    return chess.Board(board.fen()), f"Random legal position {_comparison_position_number}"
 
 
 pygame.init()
@@ -438,6 +444,22 @@ def format_search_score(score):
     return f"{score:+,} cp"
 
 
+def format_game_outcome(board):
+    """Describe the winner or the exact draw result in plain language."""
+    outcome = board.outcome(claim_draw=True)
+    if outcome is None:
+        return "Game in progress"
+    termination = outcome.termination
+    if termination == chess.Termination.STALEMATE:
+        return "Draw — stalemate"
+    if outcome.winner is None:
+        reason = termination.name.replace("_", " ").lower()
+        return f"Draw — {reason}"
+    winner = "White" if outcome.winner == chess.WHITE else "Black"
+    reason = termination.name.replace("_", " ").lower()
+    return f"{winner} wins — {reason}"
+
+
 def draw_card(rect, label, value, subtitle, accent):
     rounded(screen, rect, PANEL2)
     draw_text(screen, label.upper(), rect.x + 13, rect.y + 9, TINY, MUTED)
@@ -659,8 +681,8 @@ def draw_play_screen(w, h):
     if game_board.is_check() and not game_board.is_game_over(claim_draw=True):
         draw_text(screen, f"{turn} is in check", panel_x, top + 92, SMALL, RED)
     if game_board.is_game_over(claim_draw=True):
-        draw_text(screen, game_board.result(claim_draw=True), panel_x, top + 96, MED, GOLD)
-        draw_text(screen, game_board.outcome(claim_draw=True).termination.name.replace("_", " ").title(), panel_x, top + 125, SMALL, MUTED)
+        draw_text(screen, fit(format_game_outcome(game_board), MED, max(100, w - panel_x - 24)),
+                  panel_x, top + 96, MED, GOLD)
     progress_nodes, progress_leaves, progress_cutoffs, progress_pruned, progress_elapsed = minimax_progress
     draw_text(screen, "MINIMAX MOVE OPTIONS", panel_x, top + 142, MED, BLUE)
     if minimax_busy:
@@ -726,7 +748,8 @@ def draw_match_screen(w, h):
     last_game_moves = " ".join(game_history[-8:]) if game_history else comparison_name
     draw_text(screen, f"Game ply {match_game_board.ply()} • {game_turn} to move • Game: {last_game_moves}",
               24, 72, SMALL, GOLD)
-    draw_text(screen, match_message, 24, 91, TINY, GOLD if match_running else GREEN)
+    draw_text(screen, fit(match_message, TINY, w - 48), 24, 91, TINY,
+              GOLD if match_running else GREEN)
     preview_group = (match_preview_groups[match_preview_index]
                      if match_preview_active and match_preview_index < len(match_preview_groups) else None)
     margin, gap, top = 20, 16, 116
@@ -773,11 +796,6 @@ def draw_match_screen(w, h):
         if stats.get("last_move", "—") != "—":
             draw_text(screen, f"Best: {stats['last_move']}", info_x, board_y + 54, MED, GOLD)
             draw_text(screen, f"Score: {format_search_score(stats['last_score'])}", info_x, board_y + 80, SMALL, MUTED)
-        if game.is_game_over(claim_draw=True):
-            outcome = game.outcome(claim_draw=True)
-            draw_text(screen, f"Finished: {game.result(claim_draw=True)}", info_x, board_y + 110, MED, GOLD)
-            if outcome:
-                draw_text(screen, outcome.termination.name.replace("_", " ").title(), info_x, board_y + 136, TINY, MUTED)
         alpha, beta = match_cursor_bounds.get(key, (None, None))
         draw_text(screen, f"α: {alpha}  β: {beta}", info_x, board_y + 108, TINY, PURPLE)
         draw_text(screen, "SEARCH STATS • LIVE TOTAL", info_x, board_y + 144, SMALL, accent)
@@ -939,7 +957,7 @@ def main():
                         elif key == "match" and mode == "compare":
                             if match_running:
                                 comparison_view = "match"
-                            elif not comparison_name.startswith(("Random tactical position", "Tactical position")):
+                            elif not comparison_name.startswith(("Random legal midgame", "Random legal position")):
                                 comparison_board, comparison_name = new_comparison_position()
                                 tree_selection = None
                                 message = (f"Fresh {comparison_name} loaded ({len(comparison_board.piece_map())} pieces). "
@@ -1031,7 +1049,7 @@ def main():
                                     selected_square, legal_targets = None, []
                                     minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                                     if game_board.is_game_over(claim_draw=True):
-                                        game_message = f"Game over: {game_board.result(claim_draw=True)}"
+                                        game_message = format_game_outcome(game_board)
                                     else:
                                         request_engine_move()
                                 elif game_board.piece_at(target) and game_board.piece_at(target).color == chess.WHITE:
@@ -1063,9 +1081,10 @@ def main():
                     move = payload[0]["move"]
                     san = game_board.san(move)
                     game_board.push(move)
-                    game_message = f"Stockfish played {san}. Your move."
+                    game_message = (format_game_outcome(game_board) if game_board.is_game_over(claim_draw=True)
+                                    else f"Stockfish played {san}. Your move.")
                 else:
-                    game_message = "Game over."
+                    game_message = format_game_outcome(game_board)
             else:
                 game_message = f"Stockfish error: {payload}"
         while not minimax_queue.empty():
@@ -1175,7 +1194,7 @@ def main():
             elif status == "match_done":
                 match_running = False
                 match_preview_active = False
-                outcome, termination = payload
+                _outcome, _termination = payload
                 match_boards = {key: match_game_board.copy(stack=True) for key in ("minimax", "alpha_beta")}
                 match_active_algorithm = None
                 match_searching_algorithms.clear()
@@ -1191,8 +1210,8 @@ def main():
                               "compare node and pruning bars in the two panels.")
                 else:
                     faster = ""
-                match_message = (f"Game ended {outcome} ({termination.replace('_', ' ').lower()})."
-                                 f" Both searches reached the result.{faster} Totals are final.")
+                result_label = format_game_outcome(match_game_board)
+                match_message = (f"{result_label}. Both searches reached the result.{faster} Totals are final.")
             elif status == "match_cancelled":
                 match_running = False
                 match_preview_active = False
@@ -1228,7 +1247,7 @@ def main():
                     minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                     selected_square, legal_targets = None, []
                     if game_board.is_game_over(claim_draw=True):
-                        game_message = f"Game over: {game_board.result(claim_draw=True)}"
+                        game_message = format_game_outcome(game_board)
                     else:
                         request_engine_move()
                 else:
