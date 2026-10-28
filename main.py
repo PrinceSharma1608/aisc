@@ -122,7 +122,7 @@ def board_pixel_size(width, height):
     return max(200, min(620, height - 155, width - 400))
 
 
-def draw_chessboard(board, left, top, board_size, targets=(), selected=None):
+def draw_chessboard(board, left, top, board_size, targets=(), selected=None, candidate_moves=()):
     square = board_size // 8
     if square not in PIECE_FONTS:
         PIECE_FONTS[square] = pygame.font.SysFont("segoeuisymbol", max(28, square - 10))
@@ -147,6 +147,27 @@ def draw_chessboard(board, left, top, board_size, targets=(), selected=None):
                 glyph = piece_font.render(PIECE_GLYPHS[(piece.color, piece.piece_type)], True,
                                           (247, 247, 238) if piece.color else (23, 29, 38))
                 screen.blit(glyph, glyph.get_rect(center=rect.center))
+    # Numbered source/target markers tie the board's candidate moves to the RHS list.
+    rank_colors = [GOLD, BLUE, GREEN, PURPLE, (255, 128, 91), (87, 211, 220),
+                   (239, 119, 176), (175, 205, 105), (255, 153, 204)]
+    for index, move_text in enumerate(candidate_moves):
+        try:
+            move = chess.Move.from_uci(move_text)
+        except (TypeError, ValueError):
+            continue
+        color = rank_colors[index % len(rank_colors)]
+        source = pygame.Rect(left + chess.square_file(move.from_square) * square,
+                             top + (7 - chess.square_rank(move.from_square)) * square, square, square)
+        target = pygame.Rect(left + chess.square_file(move.to_square) * square,
+                             top + (7 - chess.square_rank(move.to_square)) * square, square, square)
+        pygame.draw.rect(screen, color, source.inflate(-6, -6), width=max(2, square // 22), border_radius=5)
+        pygame.draw.circle(screen, color, target.center, max(10, square // 4), width=max(2, square // 22))
+        badge = pygame.Rect(target.right - max(19, square // 3), target.y + 2,
+                            max(17, square // 3), max(17, square // 3))
+        pygame.draw.circle(screen, (18, 23, 34), badge.center, badge.width // 2 + 1)
+        pygame.draw.circle(screen, color, badge.center, badge.width // 2)
+        number = TINY.render(str(index + 1), True, (18, 23, 34))
+        screen.blit(number, number.get_rect(center=badge.center))
 selected_square = None
 legal_targets = []
 engine_busy = False
@@ -607,7 +628,9 @@ def draw_play_screen(w, h):
     board_size = board_pixel_size(w, h)
     square = board_size // 8
     left, top = 30, 145
-    draw_chessboard(game_board, left, top, board_size, legal_targets, selected_square)
+    board_candidates = minimax_candidates[:9] if minimax_busy or minimax_result else []
+    draw_chessboard(game_board, left, top, board_size, legal_targets, selected_square,
+                    [candidate["move"] for candidate in board_candidates])
     panel_x = left + board_size + 28
     draw_text(screen, "GAME", panel_x, top + 4, MED, BLUE)
     turn = "White" if game_board.turn else "Black"
@@ -621,33 +644,41 @@ def draw_play_screen(w, h):
         draw_text(screen, game_board.result(claim_draw=True), panel_x, top + 96, MED, GOLD)
         draw_text(screen, game_board.outcome(claim_draw=True).termination.name.replace("_", " ").title(), panel_x, top + 125, SMALL, MUTED)
     progress_nodes, progress_leaves, progress_cutoffs, progress_pruned, progress_elapsed = minimax_progress
-    draw_text(screen, "TOP MINIMAX CANDIDATES", panel_x, top + 142, MED, BLUE)
+    draw_text(screen, "MINIMAX MOVE OPTIONS", panel_x, top + 142, MED, BLUE)
     if minimax_busy:
-        draw_text(screen, f"Depth {search_depth} • {progress_nodes:,} nodes • {progress_leaves:,} leaves • {progress_elapsed:.1f}s",
+        draw_text(screen, f"Evaluating legal moves • depth {search_depth} • {progress_nodes:,} nodes • {progress_elapsed:.1f}s",
                   panel_x, top + 168, TINY, MUTED)
     elif not minimax_candidates:
-        draw_text(screen, "Move manually, or press Space to ask Minimax.", panel_x, top + 170, SMALL, MUTED)
-    shown_candidates = minimax_candidates[:10]
-    if shown_candidates:
-        area_w = max(100, w - panel_x - 28)
-        columns = 2 if area_w >= 470 else 1
-        rows_per_column = math.ceil(len(shown_candidates) / columns)
-        root_x, root_y = panel_x + area_w // 2, top + 201
-        pygame.draw.circle(screen, BLUE, (root_x, root_y), 5)
-        for index, candidate in enumerate(shown_candidates):
-            column, row = index // rows_per_column, index % rows_per_column
-            col_w = area_w // columns
-            x = panel_x + column * col_w
-            y = top + 220 + row * 19
-            node_x = x + min(col_w - 12, 16 + (index % rows_per_column) * 2)
-            is_best = minimax_result and candidate["move"] == minimax_result["best_move"]
-            color = GOLD if is_best else (PURPLE if candidate.get("score") is not None else MUTED)
-            pygame.draw.line(screen, color, (root_x, root_y), (node_x, y + 6), 1)
-            pygame.draw.circle(screen, color, (node_x, y + 6), 4 if is_best else 3)
-            score_label = "searching" if candidate.get("score") is None else format_search_score(candidate["score"])
-            label = f"{candidate['san']}: {score_label}" + ("  CHOSEN" if is_best else "")
-            draw_text(screen, label, node_x + 8, y, SMALL, color)
-    moves_top = max(top + 430, top + 220 + math.ceil(len(shown_candidates) / (2 if w - panel_x >= 470 else 1)) * 19)
+        draw_text(screen, "Press Space or click Minimax to see its choices.", panel_x, top + 170, SMALL, MUTED)
+    shown_candidates = minimax_candidates[:9] if minimax_busy or minimax_result else []
+    candidate_top = top + 197
+    candidate_colors = [GOLD, BLUE, GREEN, PURPLE, (255, 128, 91), (87, 211, 220),
+                        (239, 119, 176), (175, 205, 105), (255, 153, 204)]
+    area_w = max(100, w - panel_x - 28)
+    for index, candidate in enumerate(shown_candidates):
+        y = candidate_top + index * 27
+        is_best = bool(minimax_result and candidate["move"] == minimax_result["best_move"])
+        color = GOLD if is_best else candidate_colors[index % len(candidate_colors)]
+        row_rect = pygame.Rect(panel_x, y, area_w, 24)
+        rounded(screen, row_rect, (46, 43, 37) if is_best else PANEL2,
+                color if is_best else BORDER, radius=6)
+        pygame.draw.circle(screen, color, (panel_x + 14, y + 12), 8)
+        number = TINY.render(str(index + 1), True, (18, 23, 34))
+        screen.blit(number, number.get_rect(center=(panel_x + 14, y + 12)))
+        move = chess.Move.from_uci(candidate["move"])
+        route = f"{chess.square_name(move.from_square)} → {chess.square_name(move.to_square)}"
+        score = "evaluating…" if candidate.get("score") is None else format_search_score(candidate["score"])
+        detail = f"{candidate['san']}   {route}   {score}"
+        if is_best:
+            detail += "   BEST — PLAYING NEXT"
+        draw_text(screen, fit(detail, SMALL, area_w - 34), panel_x + 29, y + 3,
+                  SMALL, color if is_best else TEXT)
+    if minimax_busy:
+        draw_text(screen, "Board markers 1–9 match these candidate moves.", panel_x, candidate_top + 9 * 27 + 4, TINY, MUTED)
+    elif minimax_result:
+        draw_text(screen, "Highest minimax score is marked BEST; it will be played automatically.",
+                  panel_x, candidate_top + 9 * 27 + 4, TINY, GOLD)
+    moves_top = top + 465
     draw_text(screen, "Moves (SAN)", panel_x, moves_top, MED)
     history = san_history(game_board)
     pairs = [(idx, history[idx], history[idx + 1] if idx + 1 < len(history) else None)
