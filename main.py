@@ -3,6 +3,7 @@ import math
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pygame
 import chess
 from ai import analyze_candidates
@@ -43,8 +44,8 @@ tree_hitboxes = []
 selected_node = None
 mode = "menu"
 game_board = new_game()
-comparison_board = chess.Board()
-comparison_name = "Standard starting position"
+comparison_board = chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+comparison_name = "Italian middlegame"
 fen_editing = False
 fen_buffer = ""
 fen_error = ""
@@ -59,11 +60,12 @@ match_stats = {}
 match_running = False
 match_message = "Ready to visualize the actual Minimax and Alpha-Beta search paths."
 match_active_algorithm = None
+match_searching_algorithms = set()
 match_cursor_bounds = {"minimax": (None, None), "alpha_beta": (None, None)}
 match_queue = queue.Queue()
 match_thread = None
 match_cancel = None
-match_pending_ack = None
+match_pending_acks = []
 match_ack_release_at = 0.0
 PIECE_GLYPHS = {
     (chess.WHITE, chess.KING): "♔", (chess.WHITE, chess.QUEEN): "♕", (chess.WHITE, chess.ROOK): "♖",
@@ -168,6 +170,7 @@ def start_parallel_games():
     }
     match_cursor_bounds.update({"minimax": (None, None), "alpha_beta": (None, None)})
     match_active_algorithm = None
+    match_searching_algorithms.clear()
     match_cancel = threading.Event()
     cancel_event = match_cancel
     depth_snapshot = search_depth
@@ -176,6 +179,36 @@ def start_parallel_games():
 
     def task():
         game = comparison_board.copy(stack=True)
+
+        def run_algorithm(key, root, root_fen):
+            started = time.perf_counter()
+            last_cursor_at = [0.0]
+
+            def progress(visited, leaves, cutoffs, pruned):
+                if cancel_event.is_set():
+                    raise SearchCancelled()
+                match_queue.put(("match_progress", (key, visited, leaves, cutoffs,
+                                                      pruned, time.perf_counter() - started)))
+
+            def on_node(fen, path, ply, alpha, beta, visited, leaves, cutoffs, pruned):
+                if cancel_event.is_set():
+                    raise SearchCancelled()
+                now = time.perf_counter()
+                if len(path) <= 1 or now - last_cursor_at[0] >= 0.06:
+                    last_cursor_at[0] = now
+                    acknowledgement = threading.Event()
+                    match_queue.put(("match_cursor", (key, root_fen, path, ply, alpha, beta,
+                        visited, leaves, cutoffs, pruned, now - started, acknowledgement)))
+                    while not acknowledgement.wait(0.05):
+                        if cancel_event.is_set():
+                            raise SearchCancelled()
+
+            try:
+                return search_position(root, depth_snapshot, key, progress=progress, on_node=on_node)
+            except Exception:
+                cancel_event.set()
+                raise
+
         try:
             while not game.is_game_over(claim_draw=True):
                 if cancel_event.is_set():
@@ -185,38 +218,21 @@ def start_parallel_games():
                 results = {}
                 match_queue.put(("turn_start", (root_fen, root.ply())))
                 for key in ("minimax", "alpha_beta"):
-                    if cancel_event.is_set():
-                        raise SearchCancelled()
                     match_queue.put(("search_started", (key, root_fen)))
-                    started = time.perf_counter()
-                    last_cursor_at = [0.0]
-
-                    def progress(visited, leaves, cutoffs, pruned):
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="chess-search") as executor:
+                    futures = {
+                        executor.submit(run_algorithm, key, root.copy(stack=True), root_fen): key
+                        for key in ("minimax", "alpha_beta")
+                    }
+                    for future in as_completed(futures):
+                        key = futures[future]
+                        result = future.result()
                         if cancel_event.is_set():
                             raise SearchCancelled()
-                        match_queue.put(("match_progress", (key, visited, leaves, cutoffs,
-                                                             pruned, time.perf_counter() - started)))
-
-                    def on_node(fen, path, ply, alpha, beta, visited, leaves, cutoffs, pruned):
-                        if cancel_event.is_set():
-                            raise SearchCancelled()
-                        now = time.perf_counter()
-                        if len(path) <= 1 or now - last_cursor_at[0] >= 0.06:
-                            last_cursor_at[0] = now
-                            acknowledgement = threading.Event()
-                            match_queue.put(("match_cursor", (key, root_fen, path, ply, alpha, beta,
-                                visited, leaves, cutoffs, pruned, now - started, acknowledgement)))
-                            while not acknowledgement.wait(0.05):
-                                if cancel_event.is_set():
-                                    raise SearchCancelled()
-
-                    result = search_position(root, depth_snapshot, key, progress=progress, on_node=on_node)
-                    if cancel_event.is_set():
-                        raise SearchCancelled()
-                    results[key] = result
-                    match_queue.put(("search_done", (key, result["best_move"], result["best_move_san"],
-                        {name: result[name] for name in
-                         ("nodes_visited", "leaf_nodes_evaluated", "cutoffs", "pruned_moves", "elapsed", "best_score")})))
+                        results[key] = result
+                        match_queue.put(("search_done", (key, result["best_move"], result["best_move_san"],
+                            {name: result[name] for name in
+                             ("nodes_visited", "leaf_nodes_evaluated", "cutoffs", "pruned_moves", "elapsed", "best_score")})))
                 minimax_result, alpha_result = results["minimax"], results["alpha_beta"]
                 if minimax_result["best_score"] != alpha_result["best_score"]:
                     raise RuntimeError("Minimax and Alpha-Beta scores disagreed; game stopped for integrity.")
@@ -258,6 +274,7 @@ def reset_parallel_games():
     }
     match_message = "Shared game and both search cursors reset to the selected starting position."
     match_active_algorithm = None
+    match_searching_algorithms.clear()
     match_cursor_bounds.update({"minimax": (None, None), "alpha_beta": (None, None)})
 
 
@@ -396,19 +413,20 @@ def draw():
     button("plus", pygame.Rect(margin + 176, 101, 42, 35), "+", enabled=controls_enabled)
     button("run", pygame.Rect(margin + 230, 101, 175, 35), "Running..." if busy else "Run comparison", active=True, enabled=controls_enabled)
     button("reset", pygame.Rect(margin + 416, 101, 115, 35), "Reset", enabled=controls_enabled)
-    position_y = 101 if w >= 1050 else 143
-    position_x = 560 if w >= 1050 else 20
+    position_y = 101 if w >= 1200 else 143
+    position_x = 560 if w >= 1200 else 20
     button("standard", pygame.Rect(position_x, position_y, 105, 35), "Standard", enabled=controls_enabled)
     button("preset", pygame.Rect(position_x + 112, position_y, 115, 35), "Endgame", enabled=controls_enabled)
     button("fen", pygame.Rect(position_x + 234, position_y, 115, 35), "Enter FEN", active=fen_editing, enabled=controls_enabled)
-    if w >= 1050:
-        draw_text(screen, fit(f"Position: {comparison_name}", SMALL, max(120, w - 930)), 920, 111, SMALL, MUTED)
+    button("midgame", pygame.Rect(position_x + 356, position_y, 115, 35), "Middlegame", enabled=controls_enabled)
+    if w >= 1200:
+        draw_text(screen, fit(f"Position: {comparison_name}", SMALL, max(120, w - 1050)), 1040, 111, SMALL, MUTED)
     else:
         draw_text(screen, fit(f"Position: {comparison_name}", SMALL, w - 40), 20, 179, SMALL, MUTED)
     if search_depth >= 4:
         draw_text(screen, "Depth 4 can take noticeably longer.", 560, 78, SMALL, GOLD)
     gap = 12
-    compact = w < 1050
+    compact = w < 1200
     card_y, card_h = (196 if compact else 150), 78
     card_w = (w - 2 * margin - 3 * gap) // 4
     if result:
@@ -515,7 +533,7 @@ def draw_match_screen(w, h):
     global buttons
     buttons = {}
     draw_text(screen, "LIVE MINIMAX SEARCH PLAYBACK", 22, 15, TITLE)
-    draw_text(screen, f"Depth {search_depth} • both algorithms search the same game position; each board follows its actual recursive branch",
+    draw_text(screen, f"Depth {search_depth} • both algorithms search the same position concurrently; panes follow real recursive branches",
               24, 49, SMALL, MUTED)
     button("dashboard", pygame.Rect(w - 495, 18, 150, 35), "Analysis dashboard")
     button("match_reset", pygame.Rect(w - 660, 18, 150, 35), "Reset game", enabled=not match_running)
@@ -524,7 +542,7 @@ def draw_match_screen(w, h):
     button("match_menu", pygame.Rect(w - 165, 18, 145, 35), "Return to Menu", enabled=not match_running)
     game_turn = "White" if match_game_board.turn else "Black"
     game_history = san_history(match_game_board)
-    last_game_moves = " ".join(game_history[-8:]) if game_history else "Start position"
+    last_game_moves = " ".join(game_history[-8:]) if game_history else comparison_name
     draw_text(screen, f"Game ply {match_game_board.ply()} • {game_turn} to move • Game: {last_game_moves}",
               24, 72, SMALL, GOLD)
     draw_text(screen, match_message, 24, 91, TINY, GOLD if match_running else GREEN)
@@ -536,7 +554,7 @@ def draw_match_screen(w, h):
             ("minimax", "PLAIN MINIMAX", BLUE), ("alpha_beta", "ALPHA-BETA", GREEN))):
         panel = pygame.Rect(margin + index * (panel_w + gap), top, panel_w, panel_h)
         rounded(screen, panel, PANEL)
-        is_active = match_active_algorithm == key
+        is_active = key in match_searching_algorithms
         panel_title = f"{title} • SEARCHING" if is_active else title
         draw_text(screen, panel_title, panel.x + 16, panel.y + 12, MED, PURPLE if is_active else accent)
         board_x, board_y = panel.x + 14, panel.y + 58
@@ -595,7 +613,7 @@ def request_engine_move():
 def main():
     global search_depth, result, busy, message, mode, screen, game_board, selected_square, legal_targets, engine_busy, game_message
     global stockfish_depth, comparison_board, comparison_name, fen_editing, fen_buffer, fen_error, tree_selection, history_scroll
-    global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_ack, match_ack_release_at
+    global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_acks, match_ack_release_at
     running = True
     while running:
         for event in pygame.event.get():
@@ -691,13 +709,16 @@ def main():
                             start_comparison()
                         elif key == "reset" and not busy:
                             result = None
-                            comparison_board = chess.Board()
-                            comparison_name = "Standard starting position"
                             tree_selection = None
-                            message = "Ready — click Run comparison."
+                            message = f"Reset comparison view at {comparison_name}."
                         elif key == "standard" and not busy:
                             comparison_board = chess.Board()
                             comparison_name = "Standard starting position"
+                            result = None
+                            tree_selection = None
+                        elif key == "midgame" and not busy:
+                            comparison_board = chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+                            comparison_name = "Italian middlegame"
                             result = None
                             tree_selection = None
                         elif key == "preset" and not busy:
@@ -768,10 +789,13 @@ def main():
             elif status == "search_started":
                 key, root_fen = payload
                 match_active_algorithm = key
+                match_searching_algorithms.add(key)
                 match_boards[key] = chess.Board(root_fen)
                 match_cursor_bounds[key] = (None, None)
                 match_stats[key]["current"] = (0, 0, 0, 0, 0.0)
-                match_message = f"{key.replace('_', ' ').title()} is exploring this game position…"
+                match_message = ("Minimax and Alpha-Beta are exploring this same position concurrently."
+                                 if len(match_searching_algorithms) == 2 else
+                                 f"{key.replace('_', ' ').title()} is exploring the shared position…")
             elif status == "match_cursor":
                 key, root_fen, path, ply, alpha, beta, visited, leaves, cutoffs, pruned, elapsed, acknowledgement = payload
                 cursor_board = chess.Board(root_fen)
@@ -779,10 +803,11 @@ def main():
                     cursor_board.push_uci(uci)
                 match_boards[key] = cursor_board
                 match_active_algorithm = key
+                match_searching_algorithms.add(key)
                 match_cursor_bounds[key] = (alpha, beta)
                 match_stats[key]["current"] = (visited, leaves, cutoffs, pruned, elapsed)
-                match_pending_ack = acknowledgement
-                match_ack_release_at = time.perf_counter() + 0.06
+                match_pending_acks.append(acknowledgement)
+                match_ack_release_at = max(match_ack_release_at, time.perf_counter() + 0.06)
             elif status == "search_done":
                 key, best_uci, best_san, item = payload
                 stats = match_stats[key]
@@ -794,6 +819,7 @@ def main():
                 stats["searches"] = stats.get("searches", 0) + 1
                 stats["last_move"], stats["last_score"] = best_san, item["best_score"]
                 stats["current"] = (0, 0, 0, 0, 0.0)
+                match_searching_algorithms.discard(key)
                 match_message = f"{key.replace('_', ' ').title()} finished search: {best_san}, {format_search_score(item['best_score'])}."
             elif status == "game_move":
                 uci, san, fen, ply = payload
@@ -802,16 +828,19 @@ def main():
                     match_game_board.push(move)
                 match_boards = {key: match_game_board.copy(stack=True) for key in ("minimax", "alpha_beta")}
                 match_active_algorithm = None
+                match_searching_algorithms.clear()
                 match_message = f"Both scores agree. Minimax's {san} advances the shared game; Alpha-Beta searches the next position."
             elif status == "match_done":
                 match_running = False
                 outcome, termination = payload
                 match_boards = {key: match_game_board.copy(stack=True) for key in ("minimax", "alpha_beta")}
                 match_active_algorithm = None
+                match_searching_algorithms.clear()
                 match_message = f"Shared game ended {outcome} ({termination.replace('_', ' ').lower()}). Statistics are final."
             elif status == "match_cancelled":
                 match_running = False
                 match_active_algorithm = None
+                match_searching_algorithms.clear()
                 match_message = "Games stopped. Partial games and accumulated statistics are retained."
             elif status == "match_error":
                 match_running = False
@@ -820,14 +849,16 @@ def main():
         draw()
         pygame.display.flip()
         clock.tick(60)
-        if match_pending_ack and time.perf_counter() >= match_ack_release_at:
-            match_pending_ack.set()
-            match_pending_ack = None
+        if match_pending_acks and time.perf_counter() >= match_ack_release_at:
+            pending, match_pending_acks = match_pending_acks, []
+            match_ack_release_at = 0.0
+            for acknowledgement in pending:
+                acknowledgement.set()
     if match_running:
         stop_parallel_games()
-    if match_pending_ack:
-        match_pending_ack.set()
-        match_pending_ack = None
+    for acknowledgement in match_pending_acks:
+        acknowledgement.set()
+    match_pending_acks.clear()
     if match_thread and match_thread.is_alive():
         match_thread.join()
     if engine_thread and engine_thread.is_alive():
