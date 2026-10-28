@@ -1,133 +1,63 @@
 
+from pathlib import Path
 import chess
-import math
+import chess.engine
 
-# Material values in centipawns
-PIECE_VALUES = {
-    chess.PAWN: 100,
-    chess.KNIGHT: 320,
-    chess.BISHOP: 330,
-    chess.ROOK: 500,
-    chess.QUEEN: 900,
-    chess.KING: 0,
-}
-
-MATE_SCORE = 100_000
+PROJECT_DIR = Path(__file__).resolve().parent
+STOCKFISH_PATH = PROJECT_DIR / "stockfish-windows-x86-64-universal.exe"
 
 
-def evaluate(board):
-    """Positive score favors White; negative favors Black."""
-    if board.is_checkmate():
-        # The side to move has been checkmated.
-        return -MATE_SCORE if board.turn == chess.WHITE else MATE_SCORE
-
-    if board.is_game_over():
-        return 0
-
-    score = 0
-
-    for square, piece in board.piece_map().items():
-        value = PIECE_VALUES[piece.piece_type]
-
-        # Small positional bonus for advancing pawns toward promotion.
-        if piece.piece_type == chess.PAWN:
-            advancement = (
-                chess.square_rank(square)
-                if piece.color == chess.WHITE
-                else 7 - chess.square_rank(square)
-            )
-            value += advancement * 5
-
-        score += value if piece.color == chess.WHITE else -value
-
-    return score
-
-
-def move_order_score(board, move):
-    """Try captures of valuable pieces first to improve pruning."""
-    victim = board.piece_at(move.to_square)
-    attacker = board.piece_at(move.from_square)
-
-    score = 0
-
-    if victim and attacker:
-        score += 10 * PIECE_VALUES[victim.piece_type]
-        score -= PIECE_VALUES[attacker.piece_type]
-
-    if move.promotion:
-        score += PIECE_VALUES[move.promotion]
-
-    return score
+def analyze_candidates(board: chess.Board, depth: int = 10, multipv: int = 3):
+    """Return candidate move dictionaries with SAN, score and principal variation."""
+    if not STOCKFISH_PATH.is_file():
+        raise FileNotFoundError(f"Stockfish executable not found: {STOCKFISH_PATH}")
+    if board.is_game_over(claim_draw=True):
+        return []
+    multipv = max(1, min(int(multipv), board.legal_moves.count()))
+    engine = chess.engine.SimpleEngine.popen_uci(str(STOCKFISH_PATH))
+    try:
+        infos = engine.analyse(board, chess.engine.Limit(depth=max(1, int(depth))), multipv=multipv)
+        if isinstance(infos, dict):
+            infos = [infos]
+        candidates = []
+        for info in infos:
+            pv = info.get("pv", [])
+            if not pv:
+                continue
+            move = pv[0]
+            score_obj = info["score"].pov(board.turn)
+            mate = score_obj.mate()
+            score = score_obj.score(mate_score=100000)
+            temp = board.copy(stack=False)
+            san = temp.san(move)
+            pv_san = []
+            for pv_move in pv:
+                pv_san.append(temp.san(pv_move))
+                temp.push(pv_move)
+            candidates.append({"move": move, "san": san, "score": score, "mate": mate,
+                               "pv": pv_san})
+        return candidates
+    finally:
+        engine.quit()
 
 
-def minimax(board, depth, alpha, beta, maximizing):
-    if depth == 0 or board.is_game_over():
-        return evaluate(board), None
-
-    ordered_moves = sorted(
-        list(board.legal_moves),
-        key=lambda move: move_order_score(board, move),
-        reverse=True,
-    )
-
-    best_move = None
-
-    if maximizing:
-        best_score = -math.inf
-
-        for move in ordered_moves:
-            board.push(move)
-            score, _ = minimax(
-                board, depth - 1, alpha, beta, False
-            )
-            board.pop()
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-
-            alpha = max(alpha, best_score)
-
-            if beta <= alpha:
-                break
-
-        return best_score, best_move
-
-    else:
-        best_score = math.inf
-
-        for move in ordered_moves:
-            board.push(move)
-            score, _ = minimax(
-                board, depth - 1, alpha, beta, True
-            )
-            board.pop()
-
-            if score < best_score:
-                best_score = score
-                best_move = move
-
-            beta = min(beta, best_score)
-
-            if beta <= alpha:
-                break
-
-        return best_score, best_move
+def get_best_move(board: chess.Board, depth: int = 10):
+    candidates = analyze_candidates(board, depth=depth, multipv=1)
+    return candidates[0]["move"] if candidates else None
 
 
-def choose_move(board, depth=3):
-    """Return the AI's best move and its evaluation."""
-    if board.is_game_over():
-        return None, evaluate(board)
+def choose_move(board: chess.Board, depth: int = 10):
+    """Compatibility helper returning (best move, centipawn score)."""
+    candidates = analyze_candidates(board, depth=depth, multipv=1)
+    if not candidates:
+        return None, None
+    return candidates[0]["move"], candidates[0]["score"]
 
-    maximizing = board.turn == chess.WHITE
 
-    score, move = minimax(
-        board,
-        depth,
-        -math.inf,
-        math.inf,
-        maximizing,
-    )
-
-    return move, score
+if __name__ == "__main__":
+    print("Testing Stockfish integration...")
+    print(f"Engine: {STOCKFISH_PATH.name}")
+    board = chess.Board()
+    for index, item in enumerate(analyze_candidates(board, depth=10, multipv=3), start=1):
+        score = f"mate in {item['mate']}" if item["mate"] is not None else f"{item['score'] / 100:+.2f}"
+        print(f"{index}. {item['san']} | evaluation {score} | PV: {' '.join(item['pv'][:8])}")
