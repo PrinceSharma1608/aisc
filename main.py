@@ -107,6 +107,15 @@ legal_targets = []
 engine_busy = False
 engine_queue = queue.Queue()
 game_message = "Your move — White to play."
+minimax_busy = False
+minimax_queue = queue.Queue()
+minimax_thread = None
+minimax_cancel = None
+minimax_result = None
+minimax_candidates = []
+minimax_root_fen = None
+minimax_apply_at = 0.0
+minimax_progress = (0, 0, 0, 0, 0.0)
 
 
 def draw_text(surface, value, x, y, font=FONT, color=TEXT):
@@ -496,10 +505,12 @@ def draw_play_screen(w, h):
     global buttons
     buttons = {}
     draw_text(screen, "PLAY WITH STOCKFISH", 24, 18, TITLE)
-    draw_text(screen, game_message, 26, 58, SMALL, GOLD if engine_busy else GREEN if game_board.is_game_over() else MUTED)
-    button("new", pygame.Rect(24, 88, 125, 36), "New Game", enabled=not engine_busy)
-    button("undo", pygame.Rect(160, 88, 100, 36), "Undo", enabled=not engine_busy and bool(game_board.move_stack))
-    button("menu", pygame.Rect(271, 88, 145, 36), "Return to Menu", enabled=not engine_busy)
+    draw_text(screen, game_message, 26, 58, SMALL, GOLD if engine_busy or minimax_busy else GREEN if game_board.is_game_over() else MUTED)
+    button("new", pygame.Rect(24, 88, 125, 36), "New Game", enabled=not engine_busy and not minimax_busy)
+    button("undo", pygame.Rect(160, 88, 100, 36), "Undo", enabled=not engine_busy and not minimax_busy and bool(game_board.move_stack))
+    button("menu", pygame.Rect(271, 88, 145, 36), "Return to Menu", enabled=not engine_busy and not minimax_busy)
+    button("minimax", pygame.Rect(430, 88, 190, 36), "Searching…" if minimax_busy else "Minimax move  [Space]",
+           active=minimax_busy, enabled=not engine_busy and not minimax_busy and not game_board.is_game_over(claim_draw=True))
     board_size = board_pixel_size(w, h)
     square = board_size // 8
     left, top = 30, 145
@@ -516,17 +527,44 @@ def draw_play_screen(w, h):
     if game_board.is_game_over(claim_draw=True):
         draw_text(screen, game_board.result(claim_draw=True), panel_x, top + 96, MED, GOLD)
         draw_text(screen, game_board.outcome(claim_draw=True).termination.name.replace("_", " ").title(), panel_x, top + 125, SMALL, MUTED)
-    draw_text(screen, "Moves (SAN)", panel_x, top + 158, MED)
+    progress_nodes, progress_leaves, progress_cutoffs, progress_pruned, progress_elapsed = minimax_progress
+    draw_text(screen, "MINIMAX MOVE OPTIONS", panel_x, top + 142, MED, BLUE)
+    if minimax_busy:
+        draw_text(screen, f"Depth {search_depth} • {progress_nodes:,} nodes • {progress_leaves:,} leaves • {progress_elapsed:.1f}s",
+                  panel_x, top + 168, TINY, MUTED)
+    elif not minimax_candidates:
+        draw_text(screen, "Move manually, or press Space to ask Minimax.", panel_x, top + 170, SMALL, MUTED)
+    if minimax_candidates:
+        area_w = max(100, w - panel_x - 28)
+        columns = 2 if area_w >= 470 else 1
+        rows_per_column = math.ceil(len(minimax_candidates) / columns)
+        root_x, root_y = panel_x + area_w // 2, top + 201
+        pygame.draw.circle(screen, BLUE, (root_x, root_y), 5)
+        for index, candidate in enumerate(minimax_candidates):
+            column, row = index // rows_per_column, index % rows_per_column
+            col_w = area_w // columns
+            x = panel_x + column * col_w
+            y = top + 220 + row * 19
+            node_x = x + min(col_w - 12, 16 + (index % rows_per_column) * 2)
+            is_best = minimax_result and candidate["move"] == minimax_result["best_move"]
+            color = GOLD if is_best else (PURPLE if candidate.get("score") is not None else MUTED)
+            pygame.draw.line(screen, color, (root_x, root_y), (node_x, y + 6), 1)
+            pygame.draw.circle(screen, color, (node_x, y + 6), 4 if is_best else 3)
+            score_label = "searching" if candidate.get("score") is None else format_search_score(candidate["score"])
+            label = f"{candidate['san']}: {score_label}" + ("  BEST" if is_best else "")
+            draw_text(screen, label, node_x + 8, y, TINY, color)
+    moves_top = max(top + 430, top + 220 + math.ceil(len(minimax_candidates) / (2 if w - panel_x >= 470 else 1)) * 19)
+    draw_text(screen, "Moves (SAN)", panel_x, moves_top, MED)
     history = san_history(game_board)
     pairs = [(idx, history[idx], history[idx + 1] if idx + 1 < len(history) else None)
              for idx in range(0, len(history), 2)]
-    start = max(0, len(pairs) - 9 - history_scroll)
+    start = max(0, len(pairs) - 7 - history_scroll)
     end = max(start, len(pairs) - history_scroll)
     for row, (idx, white_move, black_move) in enumerate(pairs[start:end]):
         line = f"{idx // 2 + 1}. {white_move}" + (f"   {black_move}" if black_move else "")
-        draw_text(screen, line, panel_x, top + 190 + row * 22, SMALL,
+        draw_text(screen, line, panel_x, moves_top + 30 + row * 20, SMALL,
                   GOLD if idx + (1 if black_move else 0) == len(history) - 1 else MUTED)
-    draw_text(screen, "Mouse wheel: scroll move history", panel_x, top + 410, TINY, MUTED)
+    draw_text(screen, "Space or click Minimax to let the algorithm play White.", panel_x, min(h - 22, moves_top + 180), TINY, MUTED)
 
 
 def draw_match_screen(w, h):
@@ -610,10 +648,49 @@ def request_engine_move():
     engine_thread.start()
 
 
+def start_minimax_turn():
+    global minimax_busy, minimax_thread, minimax_cancel, minimax_result
+    global minimax_candidates, minimax_root_fen, minimax_progress, game_message
+    if (mode != "play" or minimax_busy or engine_busy or game_board.turn != chess.WHITE
+            or game_board.is_game_over(claim_draw=True)):
+        return
+    snapshot = game_board.copy(stack=True)
+    minimax_root_fen = snapshot.fen()
+    minimax_result = None
+    temp = snapshot.copy(stack=False)
+    minimax_candidates = [{"san": temp.san(move), "score": None, "move": move.uci()}
+                          for move in temp.legal_moves]
+    minimax_progress = (0, 0, 0, 0, 0.0)
+    minimax_cancel = threading.Event()
+    cancel_event = minimax_cancel
+    depth_snapshot = search_depth
+    minimax_busy = True
+    game_message = f"Minimax searching at depth {depth_snapshot}…"
+
+    def task():
+        started = time.perf_counter()
+        try:
+            def progress(visited, leaves, cutoffs, pruned):
+                if cancel_event.is_set():
+                    raise SearchCancelled()
+                minimax_queue.put(("progress", (visited, leaves, cutoffs, pruned,
+                                                   time.perf_counter() - started)))
+            result = search_position(snapshot, depth_snapshot, "minimax", progress=progress)
+            minimax_queue.put(("ok", result))
+        except SearchCancelled:
+            minimax_queue.put(("cancelled", None))
+        except Exception as exc:
+            minimax_queue.put(("error", str(exc)))
+
+    minimax_thread = threading.Thread(target=task, name="chess-arena-play-minimax", daemon=False)
+    minimax_thread.start()
+
+
 def main():
     global search_depth, result, busy, message, mode, screen, game_board, selected_square, legal_targets, engine_busy, game_message
     global stockfish_depth, comparison_board, comparison_name, fen_editing, fen_buffer, fen_error, tree_selection, history_scroll
     global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_acks, match_ack_release_at
+    global minimax_busy, minimax_cancel, minimax_result, minimax_candidates, minimax_root_fen, minimax_apply_at, minimax_progress, minimax_thread
     running = True
     while running:
         for event in pygame.event.get():
@@ -639,8 +716,10 @@ def main():
                     except ValueError as exc:
                         fen_error = str(exc)
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                if mode != "menu" and not engine_busy and not busy and not match_running:
+                if mode != "menu" and not engine_busy and not minimax_busy and not busy and not match_running:
                     mode = "menu"
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and mode == "play":
+                start_minimax_turn()
             elif event.type == pygame.MOUSEWHEEL and mode == "play":
                 max_scroll = max(0, (len(game_board.move_stack) + 1) // 2 - 9)
                 history_scroll = max(0, min(max_scroll, history_scroll - event.y))
@@ -661,6 +740,7 @@ def main():
                             game_board = new_game()
                             history_scroll = 0
                             game_message = "Your move — White to play."
+                            minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                         elif key == "compare":
                             mode = "compare"
                             comparison_view = "dashboard"
@@ -690,16 +770,20 @@ def main():
                             search_depth = max(1, search_depth - 1)
                         elif key == "cmp_plus":
                             search_depth = min(4, search_depth + 1)
-                        elif key == "menu" and not engine_busy and not busy:
+                        elif key == "minimax" and mode == "play":
+                            start_minimax_turn()
+                        elif key == "menu" and not engine_busy and not minimax_busy and not busy:
                             mode = "menu"
                             selected_square, legal_targets = None, []
-                        elif key == "new" and not engine_busy:
+                        elif key == "new" and not engine_busy and not minimax_busy:
                             game_board = new_game()
                             selected_square, legal_targets = None, []
+                            minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                             game_message = "New game — White to play."
-                        elif key == "undo" and game_board.move_stack and not engine_busy:
+                        elif key == "undo" and game_board.move_stack and not engine_busy and not minimax_busy:
                             undo_last_turn(game_board)
                             selected_square, legal_targets = None, []
+                            minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                             game_message = "Move undone."
                         elif key == "minus" and not busy:
                             search_depth = max(1, search_depth - 1)
@@ -732,7 +816,7 @@ def main():
                             fen_error = ""
                         break
                 else:
-                    if mode == "play" and not engine_busy and not game_board.is_game_over(claim_draw=True):
+                    if mode == "play" and not engine_busy and not minimax_busy and not game_board.is_game_over(claim_draw=True):
                         bx, by = 30, 145
                         sqsize = max(1, board_pixel_size(screen.get_width(), screen.get_height()) // 8)
                         file, rank_from_top = (event.pos[0] - bx) // sqsize, (event.pos[1] - by) // sqsize
@@ -742,6 +826,7 @@ def main():
                                 candidate = play_human_move(game_board, selected_square, target)
                                 if candidate:
                                     selected_square, legal_targets = None, []
+                                    minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                                     if game_board.is_game_over(claim_draw=True):
                                         game_message = f"Game over: {game_board.result(claim_draw=True)}"
                                     else:
@@ -780,6 +865,33 @@ def main():
                     game_message = "Game over."
             else:
                 game_message = f"Stockfish error: {payload}"
+        while not minimax_queue.empty():
+            status, payload = minimax_queue.get()
+            if status == "progress":
+                minimax_progress = payload
+            elif status == "ok":
+                if game_board.fen() != minimax_root_fen:
+                    minimax_busy = False
+                    minimax_candidates = []
+                    game_message = "Minimax result discarded because the position changed."
+                    continue
+                minimax_result = payload
+                root_moves = [node for node in payload.get("nodes", [])
+                              if node.get("parent") == 0 and node.get("kind") == "move"]
+                by_san = {node.get("san"): node for node in root_moves}
+                minimax_candidates = [
+                    {"san": move["san"], "score": by_san.get(move["san"], {}).get("score"), "move": move["move"]}
+                    for move in minimax_candidates
+                ]
+                minimax_candidates.sort(key=lambda item: item.get("score") if item.get("score") is not None else -math.inf,
+                                        reverse=True)
+                minimax_apply_at = time.monotonic() + 2.0
+                game_message = (f"Minimax reviewed {len(minimax_candidates)} legal moves and chose "
+                                f"{payload['best_move_san']} ({format_search_score(payload['best_score'])}).")
+            elif status in ("error", "cancelled"):
+                minimax_busy = False
+                minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
+                game_message = f"Minimax error: {payload}" if status == "error" else "Minimax search cancelled."
         while not match_queue.empty():
             status, payload = match_queue.get()
             if status == "match_progress":
@@ -849,6 +961,25 @@ def main():
         draw()
         pygame.display.flip()
         clock.tick(60)
+        if minimax_busy and minimax_result and minimax_apply_at and time.monotonic() >= minimax_apply_at:
+            if game_board.fen() == minimax_root_fen:
+                move = chess.Move.from_uci(minimax_result["best_move"])
+                if move in game_board.legal_moves:
+                    san = game_board.san(move)
+                    game_board.push(move)
+                    minimax_busy = False
+                    minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
+                    selected_square, legal_targets = None, []
+                    if game_board.is_game_over(claim_draw=True):
+                        game_message = f"Game over: {game_board.result(claim_draw=True)}"
+                    else:
+                        request_engine_move()
+                else:
+                    minimax_busy = False
+                    game_message = "Minimax chose a move that is no longer legal."
+            else:
+                minimax_busy = False
+                minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
         if match_pending_acks and time.perf_counter() >= match_ack_release_at:
             pending, match_pending_acks = match_pending_acks, []
             match_ack_release_at = 0.0
@@ -861,6 +992,10 @@ def main():
     match_pending_acks.clear()
     if match_thread and match_thread.is_alive():
         match_thread.join()
+    if minimax_cancel:
+        minimax_cancel.set()
+    if minimax_thread and minimax_thread.is_alive():
+        minimax_thread.join()
     if engine_thread and engine_thread.is_alive():
         engine_thread.join()
     pygame.quit()
