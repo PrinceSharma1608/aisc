@@ -111,13 +111,7 @@ Create an 8–10 slide PowerPoint presentation for a professor introducing Chess
 
 Use only real project facts, screenshots, code behavior, and measured results. Do not invent benchmarks, screenshots, test results, or claims that Alpha-Beta is always faster. Explain that both algorithms should return the same minimax score under equivalent conditions, while pruning can reduce explored work depending on position and move ordering. Keep slides readable, visually consistent, academically appropriate, and not overloaded with prose. If actual runtime or node figures are unavailable, label them as a demo placeholder or omit them; never fabricate data. Save the finished `.pptx` in the project and provide the exact path.
 
-PROMPT 12 — FINAL REFINEMENT: NATURAL GAME OUTCOMES
---------------------------------------------------
-Replace the earlier mate-in-one demo setup. Do not force, script, or guarantee a checkmate. Generate a fresh, legal, reachable midgame position by making randomized legal moves from a standard chess game, keeping a useful number of pieces on the board. Preview the generated position on both boards before the user starts. Keep the search at depth 2 and let the shared game continue using the real algorithms and legal moves until a genuine chess termination occurs. Do not add an artificial move limit or declare a winner when the game has not ended.
-
-When a game ends, show the result in plain language everywhere the final game state is displayed: for example, “White wins — checkmate”, “Black wins — checkmate”, or “Draw — stalemate”. Also name other draw reasons such as repetition or the fifty-move rule. During an ongoing game show the side to move; after a stop or error, do not claim that either side won. Keep Minimax and Alpha-Beta score checks and live per-algorithm statistics intact.
-
 END OF PROMPT SEQUENCE
 ======================
 
-The intended final demo flow is: open Algorithm Comparison, review a newly generated reachable midgame on both boards, start Visualize Game, observe legal move previews, watch both real search paths and live per-algorithm metrics, compare Alpha-Beta's completion/pruning with Minimax, and let the shared game reach a genuine chess result. The original short mate-in-one requirement is superseded by Prompt 12.
+The intended final demo flow is: open Algorithm Comparison, review the newly generated shared position on both boards, start Visualize Game, observe legal move previews, watch both real search paths and live per-algorithm metrics, compare Alpha-Beta's completion/pruning with Minimax, and see the selected mate finish the game.
