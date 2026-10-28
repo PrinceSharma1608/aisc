@@ -31,6 +31,7 @@ _comparison_position_number = 0
 MATCH_DEPTH = 2
 DIFFICULTY_DEPTHS = {"Easy": 2, "Medium": 6, "Hard": 10}
 selected_difficulty = "Medium"
+SIMULATION_DEPTH = 2
 
 
 def new_comparison_position():
@@ -114,6 +115,7 @@ match_boards = {"minimax": chess.Board(), "alpha_beta": chess.Board()}
 match_game_board = chess.Board()
 match_stats = {}
 match_running = False
+simulation_active = False
 match_message = "Ready to visualize the actual Minimax and Alpha-Beta search paths."
 match_active_algorithm = None
 match_searching_algorithms = set()
@@ -440,6 +442,20 @@ def format_search_score(score):
     return f"{score:+,} cp"
 
 
+def format_game_outcome(board):
+    outcome = board.outcome(claim_draw=True)
+    if outcome is None:
+        return "Game in progress"
+    if outcome.termination == chess.Termination.STALEMATE:
+        return "Draw — stalemate"
+    if outcome.winner is None:
+        reason = outcome.termination.name.replace("_", " ").lower()
+        return f"Draw — {reason}"
+    winner = "White" if outcome.winner == chess.WHITE else "Black"
+    reason = outcome.termination.name.replace("_", " ").lower()
+    return f"{winner} wins — {reason}"
+
+
 def draw_card(rect, label, value, subtitle, accent):
     rounded(screen, rect, PANEL2)
     draw_text(screen, label.upper(), rect.x + 13, rect.y + 9, TINY, MUTED)
@@ -668,11 +684,15 @@ def draw_play_screen(w, h):
     draw_text(screen, "PLAY WITH STOCKFISH", 24, 18, TITLE)
     draw_text(screen, f"{selected_difficulty} • Stockfish depth {stockfish_depth}", 370, 28, SMALL, BLUE)
     draw_text(screen, game_message, 26, 58, SMALL, GOLD if engine_busy or minimax_busy else GREEN if game_board.is_game_over() else MUTED)
-    button("new", pygame.Rect(24, 88, 125, 36), "New Game", enabled=not engine_busy and not minimax_busy)
-    button("undo", pygame.Rect(160, 88, 100, 36), "Undo", enabled=not engine_busy and not minimax_busy and bool(game_board.move_stack))
-    button("menu", pygame.Rect(271, 88, 145, 36), "Return to Menu", enabled=not engine_busy and not minimax_busy)
+    button("new", pygame.Rect(24, 88, 125, 36), "New Game", enabled=not engine_busy and not minimax_busy and not simulation_active)
+    button("undo", pygame.Rect(160, 88, 100, 36), "Undo", enabled=not engine_busy and not minimax_busy and not simulation_active and bool(game_board.move_stack))
+    button("menu", pygame.Rect(271, 88, 145, 36), "Return to Menu", enabled=not engine_busy and not minimax_busy and not simulation_active)
     button("minimax", pygame.Rect(430, 88, 190, 36), "Searching…" if minimax_busy else "Minimax move  [Space]",
-           active=minimax_busy, enabled=not engine_busy and not minimax_busy and not game_board.is_game_over(claim_draw=True))
+           active=minimax_busy, enabled=not engine_busy and not minimax_busy and not simulation_active and not game_board.is_game_over(claim_draw=True))
+    button("simulate", pygame.Rect(630, 88, 170, 36),
+           "Stop simulation" if simulation_active else "Simulate result",
+           active=simulation_active,
+           enabled=simulation_active or (not engine_busy and not minimax_busy and not game_board.is_game_over(claim_draw=True)))
     board_size = board_pixel_size(w, h)
     square = board_size // 8
     left, top = 30, 145
@@ -689,8 +709,8 @@ def draw_play_screen(w, h):
     if game_board.is_check() and not game_board.is_game_over(claim_draw=True):
         draw_text(screen, f"{turn} is in check", panel_x, top + 92, SMALL, RED)
     if game_board.is_game_over(claim_draw=True):
-        draw_text(screen, game_board.result(claim_draw=True), panel_x, top + 96, MED, GOLD)
-        draw_text(screen, game_board.outcome(claim_draw=True).termination.name.replace("_", " ").title(), panel_x, top + 125, SMALL, MUTED)
+        draw_text(screen, fit(format_game_outcome(game_board), MED, max(100, w - panel_x - 24)),
+                  panel_x, top + 96, MED, GOLD)
     progress_nodes, progress_leaves, progress_cutoffs, progress_pruned, progress_elapsed = minimax_progress
     draw_text(screen, "MINIMAX MOVE OPTIONS", panel_x, top + 142, MED, BLUE)
     if minimax_busy:
@@ -854,11 +874,13 @@ def draw_match_screen(w, h):
 def request_engine_move():
     global engine_busy, game_message, engine_thread
     engine_busy = True
-    game_message = "Stockfish is thinking…"
+    depth = SIMULATION_DEPTH if simulation_active else stockfish_depth
+    game_message = (f"Simulation running: Stockfish is searching at depth {depth}…"
+                    if simulation_active else "Stockfish is thinking…")
     snapshot = game_board.copy(stack=True)
     def task():
         try:
-            engine_queue.put(("ok", analyze_candidates(snapshot, depth=stockfish_depth, multipv=1)))
+            engine_queue.put(("ok", analyze_candidates(snapshot, depth=depth, multipv=1)))
         except Exception as exc:
             engine_queue.put(("error", str(exc)))
     engine_thread = threading.Thread(target=task, daemon=False)
@@ -868,7 +890,7 @@ def request_engine_move():
 def start_minimax_turn():
     global minimax_busy, minimax_thread, minimax_cancel, minimax_result
     global minimax_candidates, minimax_root_fen, minimax_progress, game_message
-    if (mode != "play" or minimax_busy or engine_busy or game_board.turn != chess.WHITE
+    if (mode != "play" or minimax_busy or engine_busy or simulation_active or game_board.turn != chess.WHITE
             or game_board.is_game_over(claim_draw=True)):
         return
     snapshot = game_board.copy(stack=True)
@@ -905,7 +927,7 @@ def start_minimax_turn():
 
 def main():
     global search_depth, result, busy, message, mode, screen, game_board, selected_square, legal_targets, engine_busy, game_message
-    global selected_difficulty, stockfish_depth
+    global selected_difficulty, stockfish_depth, simulation_active
     global comparison_board, comparison_name, fen_editing, fen_buffer, fen_error, tree_selection, history_scroll
     global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_acks, match_ack_release_at
     global match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_next_at, match_preview_done_ack
@@ -915,6 +937,7 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+                simulation_active = False
             elif event.type == pygame.VIDEORESIZE:
                 screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
             elif event.type == pygame.TEXTINPUT and fen_editing:
@@ -961,6 +984,7 @@ def main():
                             stockfish_depth = DIFFICULTY_DEPTHS[selected_difficulty]
                         elif key == "start_game":
                             stockfish_depth = DIFFICULTY_DEPTHS[selected_difficulty]
+                            simulation_active = False
                             mode = "play"
                             game_board = new_game()
                             history_scroll = 0
@@ -1014,10 +1038,20 @@ def main():
                             search_depth = min(4, search_depth + 1)
                         elif key == "minimax" and mode == "play":
                             start_minimax_turn()
+                        elif key == "simulate" and mode == "play":
+                            if simulation_active:
+                                simulation_active = False
+                                game_message = "Simulation will stop after the current Stockfish move."
+                            elif not engine_busy and not minimax_busy and not game_board.is_game_over(claim_draw=True):
+                                simulation_active = True
+                                game_message = (f"Simulating to a real result: Stockfish plays both sides "
+                                               f"at depth {SIMULATION_DEPTH}.")
+                                request_engine_move()
                         elif key == "menu" and not engine_busy and not minimax_busy and not busy:
                             mode = "menu"
                             selected_square, legal_targets = None, []
                         elif key == "new" and not engine_busy and not minimax_busy:
+                            simulation_active = False
                             game_board = new_game()
                             selected_square, legal_targets = None, []
                             minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
@@ -1058,7 +1092,7 @@ def main():
                             fen_error = ""
                         break
                 else:
-                    if mode == "play" and not engine_busy and not minimax_busy and not game_board.is_game_over(claim_draw=True):
+                    if mode == "play" and not engine_busy and not minimax_busy and not simulation_active and not game_board.is_game_over(claim_draw=True):
                         bx, by = 30, 145
                         sqsize = max(1, board_pixel_size(screen.get_width(), screen.get_height()) // 8)
                         file, rank_from_top = (event.pos[0] - bx) // sqsize, (event.pos[1] - by) // sqsize
@@ -1070,7 +1104,7 @@ def main():
                                     selected_square, legal_targets = None, []
                                     minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                                     if game_board.is_game_over(claim_draw=True):
-                                        game_message = f"Game over: {game_board.result(claim_draw=True)}"
+                                        game_message = format_game_outcome(game_board)
                                     else:
                                         request_engine_move()
                                 elif game_board.piece_at(target) and game_board.piece_at(target).color == chess.WHITE:
@@ -1102,10 +1136,19 @@ def main():
                     move = payload[0]["move"]
                     san = game_board.san(move)
                     game_board.push(move)
-                    game_message = f"Stockfish played {san}. Your move."
+                    if game_board.is_game_over(claim_draw=True):
+                        simulation_active = False
+                        game_message = format_game_outcome(game_board)
+                    elif simulation_active:
+                        game_message = f"Simulation: {'White' if game_board.turn else 'Black'} to move…"
+                        request_engine_move()
+                    else:
+                        game_message = f"Stockfish played {san}. Your move."
                 else:
-                    game_message = "Game over."
+                    simulation_active = False
+                    game_message = format_game_outcome(game_board)
             else:
+                simulation_active = False
                 game_message = f"Stockfish error: {payload}"
         while not minimax_queue.empty():
             status, payload = minimax_queue.get()
@@ -1267,7 +1310,7 @@ def main():
                     minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                     selected_square, legal_targets = None, []
                     if game_board.is_game_over(claim_draw=True):
-                        game_message = f"Game over: {game_board.result(claim_draw=True)}"
+                        game_message = format_game_outcome(game_board)
                     else:
                         request_engine_move()
                 else:
