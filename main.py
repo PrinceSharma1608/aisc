@@ -29,6 +29,8 @@ _position_random = random.SystemRandom()
 _seen_comparison_positions = set()
 _comparison_position_number = 0
 MATCH_DEPTH = 2
+DIFFICULTY_DEPTHS = {"Easy": 2, "Medium": 6, "Hard": 10}
+selected_difficulty = "Medium"
 
 
 def new_comparison_position():
@@ -514,6 +516,33 @@ def draw():
         centered(screen, "Play mode: human vs Stockfish.  Comparison mode: inspect the custom search algorithms.",
                  w // 2, int(h * .65), SMALL, MUTED)
         return
+    if mode == "difficulty":
+        centered(screen, "CHOOSE YOUR DIFFICULTY", w // 2, int(h * .17), TITLE)
+        centered(screen, "Choose how deeply Stockfish searches before the game starts.",
+                 w // 2, int(h * .24), FONT, MUTED)
+        gap = 14
+        card_w = min(250, (w - 80 - 2 * gap) // 3)
+        card_y, card_h = int(h * .34), 135
+        total_w = 3 * card_w + 2 * gap
+        start_x = (w - total_w) // 2
+        for index, (level, depth) in enumerate(DIFFICULTY_DEPTHS.items()):
+            rect = pygame.Rect(start_x + index * (card_w + gap), card_y, card_w, card_h)
+            rounded(screen, rect, PANEL2, BLUE if selected_difficulty == level else BORDER)
+            if selected_difficulty == level:
+                pygame.draw.rect(screen, BLUE, rect, width=2, border_radius=12)
+            centered(screen, level.upper(), rect.centerx, rect.y + 24, MED,
+                     BLUE if selected_difficulty == level else TEXT)
+            centered(screen, f"Search depth {depth}", rect.centerx, rect.y + 66, FONT, MUTED)
+            centered(screen, {"Easy": "Good for a relaxed game", "Medium": "A balanced challenge",
+                              "Hard": "Strongest setting"}[level],
+                     rect.centerx, rect.y + 99, TINY, MUTED)
+            buttons[f"difficulty_{level.lower()}"] = rect
+        centered(screen, "Difficulty changes Stockfish's search depth; it is not a fixed Elo rating.",
+                 w // 2, card_y + card_h + 28, SMALL, MUTED)
+        button("start_game", pygame.Rect(w // 2 - 115, int(h * .66), 230, 46),
+               f"Start Game • {selected_difficulty}", active=True)
+        button("difficulty_back", pygame.Rect(w // 2 - 95, int(h * .75), 190, 40), "Back to Menu")
+        return
     if mode == "settings":
         centered(screen, "SETTINGS", w // 2, int(h * .16), TITLE)
         centered(screen, "Stockfish difficulty is a search depth, not an Elo rating.", w // 2, int(h * .22), FONT, MUTED)
@@ -637,6 +666,7 @@ def draw_play_screen(w, h):
     global buttons
     buttons = {}
     draw_text(screen, "PLAY WITH STOCKFISH", 24, 18, TITLE)
+    draw_text(screen, f"{selected_difficulty} • Stockfish depth {stockfish_depth}", 370, 28, SMALL, BLUE)
     draw_text(screen, game_message, 26, 58, SMALL, GOLD if engine_busy or minimax_busy else GREEN if game_board.is_game_over() else MUTED)
     button("new", pygame.Rect(24, 88, 125, 36), "New Game", enabled=not engine_busy and not minimax_busy)
     button("undo", pygame.Rect(160, 88, 100, 36), "Undo", enabled=not engine_busy and not minimax_busy and bool(game_board.move_stack))
@@ -875,7 +905,8 @@ def start_minimax_turn():
 
 def main():
     global search_depth, result, busy, message, mode, screen, game_board, selected_square, legal_targets, engine_busy, game_message
-    global stockfish_depth, comparison_board, comparison_name, fen_editing, fen_buffer, fen_error, tree_selection, history_scroll
+    global selected_difficulty, stockfish_depth
+    global comparison_board, comparison_name, fen_editing, fen_buffer, fen_error, tree_selection, history_scroll
     global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_acks, match_ack_release_at
     global match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_next_at, match_preview_done_ack
     global minimax_busy, minimax_cancel, minimax_result, minimax_candidates, minimax_root_fen, minimax_apply_at, minimax_progress, minimax_thread
@@ -924,11 +955,19 @@ def main():
                 for key, rect in list(buttons.items()):
                     if rect.collidepoint(event.pos):
                         if key == "play":
+                            mode = "difficulty"
+                        elif key in ("difficulty_easy", "difficulty_medium", "difficulty_hard"):
+                            selected_difficulty = key.rsplit("_", 1)[-1].title()
+                            stockfish_depth = DIFFICULTY_DEPTHS[selected_difficulty]
+                        elif key == "start_game":
+                            stockfish_depth = DIFFICULTY_DEPTHS[selected_difficulty]
                             mode = "play"
                             game_board = new_game()
                             history_scroll = 0
                             game_message = "Your move — White to play."
                             minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
+                        elif key == "difficulty_back":
+                            mode = "menu"
                         elif key == "compare":
                             mode = "compare"
                             comparison_view = "dashboard"

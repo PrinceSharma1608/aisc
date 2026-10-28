@@ -111,7 +111,11 @@ Create an 8–10 slide PowerPoint presentation for a professor introducing Chess
 
 Use only real project facts, screenshots, code behavior, and measured results. Do not invent benchmarks, screenshots, test results, or claims that Alpha-Beta is always faster. Explain that both algorithms should return the same minimax score under equivalent conditions, while pruning can reduce explored work depending on position and move ordering. Keep slides readable, visually consistent, academically appropriate, and not overloaded with prose. If actual runtime or node figures are unavailable, label them as a demo placeholder or omit them; never fabricate data. Save the finished `.pptx` in the project and provide the exact path.
 
+PROMPT 12 — ADD A PRE-GAME DIFFICULTY CHOICE
+--------------------------------------------
+Before Play with AI starts, show a difficulty-selection screen with Easy, Medium, and Hard choices and a separate Start Game action. Map the levels to Stockfish search depths 2, 6, and 10 respectively. Clearly explain that search depth is a practical difficulty control, not a guaranteed Elo rating. The selected difficulty must set the depth actually passed to Stockfish, remain visible during the game, and be retained for New Game. Keep the existing manual White moves and Space/Minimax move option working. Make Back to Menu and selection feedback clear, and ensure no game begins before the player confirms Start Game.
+
 END OF PROMPT SEQUENCE
 ======================
 
-The intended final demo flow is: open Algorithm Comparison, review the newly generated shared position on both boards, start Visualize Game, observe legal move previews, watch both real search paths and live per-algorithm metrics, compare Alpha-Beta's completion/pruning with Minimax, and see the selected mate finish the game.
+The intended final demo flow is: select Play with AI, choose a difficulty and start a game; or open Algorithm Comparison, review the newly generated shared position on both boards, start Visualize Game, observe legal move previews, watch both real search paths and live per-algorithm metrics, compare Alpha-Beta's completion/pruning with Minimax, and see the selected mate finish the game.
