@@ -16,7 +16,7 @@ PANEL = (25, 32, 46)
 PANEL2 = (31, 40, 57)
 BORDER = (57, 70, 91)
 TEXT = (236, 241, 249)
-MUTED = (151, 164, 183)
+MUTED = (177, 190, 207)
 BLUE = (91, 177, 255)
 GREEN = (65, 207, 148)
 RED = (239, 91, 111)
@@ -27,12 +27,12 @@ pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
 pygame.display.set_caption("Chess Arena | Minimax vs Alpha-Beta")
 clock = pygame.time.Clock()
-FONT = pygame.font.SysFont("segoeui", 16)
-SMALL = pygame.font.SysFont("segoeui", 13)
-TINY = pygame.font.SysFont("segoeui", 11)
-MED = pygame.font.SysFont("segoeui", 19, bold=True)
-TITLE = pygame.font.SysFont("segoeui", 28, bold=True)
-BIG = pygame.font.SysFont("segoeui", 25, bold=True)
+FONT = pygame.font.SysFont("segoeui", 18)
+SMALL = pygame.font.SysFont("segoeui", 15)
+TINY = pygame.font.SysFont("segoeui", 13)
+MED = pygame.font.SysFont("segoeui", 21, bold=True)
+TITLE = pygame.font.SysFont("segoeui", 31, bold=True)
+BIG = pygame.font.SysFont("segoeui", 27, bold=True)
 
 search_depth = 3
 result = None
@@ -44,8 +44,8 @@ tree_hitboxes = []
 selected_node = None
 mode = "menu"
 game_board = new_game()
-comparison_board = chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
-comparison_name = "Italian middlegame"
+comparison_board = chess.Board("8/5pk1/6p1/2r5/3R4/5P2/5KPP/8 w - - 0 35")
+comparison_name = "Late rook endgame"
 fen_editing = False
 fen_buffer = ""
 fen_error = ""
@@ -427,7 +427,7 @@ def draw():
     button("standard", pygame.Rect(position_x, position_y, 105, 35), "Standard", enabled=controls_enabled)
     button("preset", pygame.Rect(position_x + 112, position_y, 115, 35), "Endgame", enabled=controls_enabled)
     button("fen", pygame.Rect(position_x + 234, position_y, 115, 35), "Enter FEN", active=fen_editing, enabled=controls_enabled)
-    button("midgame", pygame.Rect(position_x + 356, position_y, 115, 35), "Middlegame", enabled=controls_enabled)
+    button("midgame", pygame.Rect(position_x + 356, position_y, 115, 35), "Late game", enabled=controls_enabled)
     if w >= 1200:
         draw_text(screen, fit(f"Position: {comparison_name}", SMALL, max(120, w - 1050)), 1040, 111, SMALL, MUTED)
     else:
@@ -491,7 +491,7 @@ def draw():
         else:
             footer_text = f"Scores match: {s['same_score']} | Best: {result['minimax']['best_move_san']} / {result['alpha_beta']['best_move_san']} | Click a node to inspect it."
     else:
-        footer_text = "Same starting position • Same depth • Same evaluation • Same move ordering"
+        footer_text = "Same position • Same depth • Same evaluation • Same move ordering"
     draw_text(screen, fit(footer_text, SMALL, footer.width - 24), footer.x + 12, footer.y + 36, SMALL, MUTED)
     if fen_editing:
         overlay = pygame.Rect(40, h // 2 - 75, w - 80, 150)
@@ -528,19 +528,20 @@ def draw_play_screen(w, h):
         draw_text(screen, game_board.result(claim_draw=True), panel_x, top + 96, MED, GOLD)
         draw_text(screen, game_board.outcome(claim_draw=True).termination.name.replace("_", " ").title(), panel_x, top + 125, SMALL, MUTED)
     progress_nodes, progress_leaves, progress_cutoffs, progress_pruned, progress_elapsed = minimax_progress
-    draw_text(screen, "MINIMAX MOVE OPTIONS", panel_x, top + 142, MED, BLUE)
+    draw_text(screen, "TOP MINIMAX CANDIDATES", panel_x, top + 142, MED, BLUE)
     if minimax_busy:
         draw_text(screen, f"Depth {search_depth} • {progress_nodes:,} nodes • {progress_leaves:,} leaves • {progress_elapsed:.1f}s",
                   panel_x, top + 168, TINY, MUTED)
     elif not minimax_candidates:
         draw_text(screen, "Move manually, or press Space to ask Minimax.", panel_x, top + 170, SMALL, MUTED)
-    if minimax_candidates:
+    shown_candidates = minimax_candidates[:10]
+    if shown_candidates:
         area_w = max(100, w - panel_x - 28)
         columns = 2 if area_w >= 470 else 1
-        rows_per_column = math.ceil(len(minimax_candidates) / columns)
+        rows_per_column = math.ceil(len(shown_candidates) / columns)
         root_x, root_y = panel_x + area_w // 2, top + 201
         pygame.draw.circle(screen, BLUE, (root_x, root_y), 5)
-        for index, candidate in enumerate(minimax_candidates):
+        for index, candidate in enumerate(shown_candidates):
             column, row = index // rows_per_column, index % rows_per_column
             col_w = area_w // columns
             x = panel_x + column * col_w
@@ -551,9 +552,9 @@ def draw_play_screen(w, h):
             pygame.draw.line(screen, color, (root_x, root_y), (node_x, y + 6), 1)
             pygame.draw.circle(screen, color, (node_x, y + 6), 4 if is_best else 3)
             score_label = "searching" if candidate.get("score") is None else format_search_score(candidate["score"])
-            label = f"{candidate['san']}: {score_label}" + ("  BEST" if is_best else "")
-            draw_text(screen, label, node_x + 8, y, TINY, color)
-    moves_top = max(top + 430, top + 220 + math.ceil(len(minimax_candidates) / (2 if w - panel_x >= 470 else 1)) * 19)
+            label = f"{candidate['san']}: {score_label}" + ("  CHOSEN" if is_best else "")
+            draw_text(screen, label, node_x + 8, y, SMALL, color)
+    moves_top = max(top + 430, top + 220 + math.ceil(len(shown_candidates) / (2 if w - panel_x >= 470 else 1)) * 19)
     draw_text(screen, "Moves (SAN)", panel_x, moves_top, MED)
     history = san_history(game_board)
     pairs = [(idx, history[idx], history[idx + 1] if idx + 1 < len(history) else None)
@@ -801,8 +802,8 @@ def main():
                             result = None
                             tree_selection = None
                         elif key == "midgame" and not busy:
-                            comparison_board = chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
-                            comparison_name = "Italian middlegame"
+                            comparison_board = chess.Board("8/5pk1/6p1/2r5/3R4/5P2/5KPP/8 w - - 0 35")
+                            comparison_name = "Late rook endgame"
                             result = None
                             tree_selection = None
                         elif key == "preset" and not busy:
