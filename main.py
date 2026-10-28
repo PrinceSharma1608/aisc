@@ -44,8 +44,8 @@ tree_hitboxes = []
 selected_node = None
 mode = "menu"
 game_board = new_game()
-comparison_board = chess.Board("8/5pk1/6p1/2r5/3R4/5P2/5KPP/8 w - - 0 35")
-comparison_name = "Late rook endgame"
+comparison_board = chess.Board("7k/8/5KQ1/8/8/8/8/8 w - - 0 35")
+comparison_name = "Near-mate queen endgame"
 fen_editing = False
 fen_buffer = ""
 fen_error = ""
@@ -67,6 +67,15 @@ match_thread = None
 match_cancel = None
 match_pending_acks = []
 match_ack_release_at = 0.0
+match_start_ply = 0
+match_preview_active = False
+match_preview_groups = []
+match_preview_index = 0
+match_preview_next_at = 0.0
+match_preview_done_ack = None
+MATCH_PREVIEW_INTERVAL = 0.42
+MATCH_CURSOR_INTERVAL = 0.18
+MATCH_ACK_INTERVAL = 0.18
 PIECE_GLYPHS = {
     (chess.WHITE, chess.KING): "♔", (chess.WHITE, chess.QUEEN): "♕", (chess.WHITE, chess.ROOK): "♖",
     (chess.WHITE, chess.BISHOP): "♗", (chess.WHITE, chess.KNIGHT): "♘", (chess.WHITE, chess.PAWN): "♙",
@@ -163,12 +172,33 @@ def start_comparison():
     threading.Thread(target=task, daemon=True).start()
 
 
+def legal_move_preview_groups(board):
+    """Group every legal destination by the piece that can make the move."""
+    grouped = {}
+    for move in board.legal_moves:
+        grouped.setdefault(move.from_square, []).append(move)
+    return [
+        {"square": square, "piece": board.piece_at(square).symbol().upper(),
+         "targets": sorted({move.to_square for move in moves}), "move_count": len(moves)}
+        for square, moves in grouped.items()
+    ]
+
+
+def move_preview_message(groups, index):
+    group = groups[index]
+    square = chess.square_name(group["square"])
+    return (f"Legal move preview {index + 1}/{len(groups)}: "
+            f"{group['piece']} on {square}, {group['move_count']} legal move(s) "
+            f"to {len(group['targets'])} square(s).")
+
+
 def start_parallel_games():
-    global match_running, match_message, match_boards, match_game_board, match_stats, match_cancel, match_thread, comparison_view, match_active_algorithm
+    global match_running, match_message, match_boards, match_game_board, match_stats, match_cancel, match_thread, comparison_view, match_active_algorithm, match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_done_ack
     if match_running or busy:
         return
     comparison_view = "match"
     match_game_board = comparison_board.copy(stack=True)
+    match_start_ply = match_game_board.ply()
     match_boards = {"minimax": match_game_board.copy(stack=True),
                     "alpha_beta": match_game_board.copy(stack=True)}
     match_stats = {
@@ -180,11 +210,15 @@ def start_parallel_games():
     match_cursor_bounds.update({"minimax": (None, None), "alpha_beta": (None, None)})
     match_active_algorithm = None
     match_searching_algorithms.clear()
+    match_preview_active = False
+    match_preview_groups = []
+    match_preview_index = 0
+    match_preview_done_ack = None
     match_cancel = threading.Event()
     cancel_event = match_cancel
     depth_snapshot = search_depth
     match_running = True
-    match_message = f"Starting shared game at depth {depth_snapshot}. Both algorithms search each same position."
+    match_message = f"Starting short endgame at depth {depth_snapshot}. Previewing every legal move first."
 
     def task():
         game = comparison_board.copy(stack=True)
@@ -203,7 +237,7 @@ def start_parallel_games():
                 if cancel_event.is_set():
                     raise SearchCancelled()
                 now = time.perf_counter()
-                if len(path) <= 1 or now - last_cursor_at[0] >= 0.06:
+                if len(path) <= 1 or now - last_cursor_at[0] >= MATCH_CURSOR_INTERVAL:
                     last_cursor_at[0] = now
                     acknowledgement = threading.Event()
                     match_queue.put(("match_cursor", (key, root_fen, path, ply, alpha, beta,
@@ -225,6 +259,11 @@ def start_parallel_games():
                 root = game.copy(stack=True)
                 root_fen = root.fen()
                 results = {}
+                preview_done = threading.Event()
+                match_queue.put(("move_preview", (root_fen, legal_move_preview_groups(root), preview_done)))
+                while not preview_done.wait(0.05):
+                    if cancel_event.is_set():
+                        raise SearchCancelled()
                 match_queue.put(("turn_start", (root_fen, root.ply())))
                 for key in ("minimax", "alpha_beta"):
                     match_queue.put(("search_started", (key, root_fen)))
@@ -264,15 +303,19 @@ def start_parallel_games():
 
 
 def stop_parallel_games():
-    global match_message
+    global match_message, match_preview_active, match_preview_done_ack
     if match_running and match_cancel:
         match_cancel.set()
+        if match_preview_done_ack:
+            match_preview_done_ack.set()
+        match_preview_active = False
         match_message = "Stopping after the current search checkpoint…"
 
 
 def reset_parallel_games():
-    global match_boards, match_game_board, match_stats, match_message, match_active_algorithm
+    global match_boards, match_game_board, match_stats, match_message, match_active_algorithm, match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_done_ack
     match_game_board = comparison_board.copy(stack=True)
+    match_start_ply = match_game_board.ply()
     match_boards = {"minimax": match_game_board.copy(stack=True),
                     "alpha_beta": match_game_board.copy(stack=True)}
     match_stats = {
@@ -283,6 +326,12 @@ def reset_parallel_games():
     }
     match_message = "Shared game and both search cursors reset to the selected starting position."
     match_active_algorithm = None
+    match_preview_active = False
+    match_preview_groups = []
+    match_preview_index = 0
+    if match_preview_done_ack:
+        match_preview_done_ack.set()
+    match_preview_done_ack = None
     match_searching_algorithms.clear()
     match_cursor_bounds.update({"minimax": (None, None), "alpha_beta": (None, None)})
 
@@ -427,7 +476,7 @@ def draw():
     button("standard", pygame.Rect(position_x, position_y, 105, 35), "Standard", enabled=controls_enabled)
     button("preset", pygame.Rect(position_x + 112, position_y, 115, 35), "Endgame", enabled=controls_enabled)
     button("fen", pygame.Rect(position_x + 234, position_y, 115, 35), "Enter FEN", active=fen_editing, enabled=controls_enabled)
-    button("midgame", pygame.Rect(position_x + 356, position_y, 115, 35), "Late game", enabled=controls_enabled)
+    button("midgame", pygame.Rect(position_x + 356, position_y, 115, 35), "Near mate", enabled=controls_enabled)
     if w >= 1200:
         draw_text(screen, fit(f"Position: {comparison_name}", SMALL, max(120, w - 1050)), 1040, 111, SMALL, MUTED)
     else:
@@ -572,7 +621,7 @@ def draw_match_screen(w, h):
     global buttons
     buttons = {}
     draw_text(screen, "LIVE MINIMAX SEARCH PLAYBACK", 22, 15, TITLE)
-    draw_text(screen, f"Depth {search_depth} • both algorithms search the same position concurrently; panes follow real recursive branches",
+    draw_text(screen, f"Depth {search_depth} • legal moves previewed first; both searches animate concurrently",
               24, 49, SMALL, MUTED)
     button("dashboard", pygame.Rect(w - 495, 18, 150, 35), "Analysis dashboard")
     button("match_reset", pygame.Rect(w - 660, 18, 150, 35), "Reset game", enabled=not match_running)
@@ -585,6 +634,8 @@ def draw_match_screen(w, h):
     draw_text(screen, f"Game ply {match_game_board.ply()} • {game_turn} to move • Game: {last_game_moves}",
               24, 72, SMALL, GOLD)
     draw_text(screen, match_message, 24, 91, TINY, GOLD if match_running else GREEN)
+    preview_group = (match_preview_groups[match_preview_index]
+                     if match_preview_active and match_preview_index < len(match_preview_groups) else None)
     margin, gap, top = 20, 16, 116
     panel_w = (w - 2 * margin - gap) // 2
     panel_h = h - top - 16
@@ -594,10 +645,13 @@ def draw_match_screen(w, h):
         panel = pygame.Rect(margin + index * (panel_w + gap), top, panel_w, panel_h)
         rounded(screen, panel, PANEL)
         is_active = key in match_searching_algorithms
-        panel_title = f"{title} • SEARCHING" if is_active else title
+        panel_title = (f"{title} • MOVE PREVIEW {match_preview_index + 1}/{len(match_preview_groups)}"
+                       if preview_group else f"{title} • SEARCHING" if is_active else title)
         draw_text(screen, panel_title, panel.x + 16, panel.y + 12, MED, PURPLE if is_active else accent)
         board_x, board_y = panel.x + 14, panel.y + 58
-        draw_chessboard(match_boards[key], board_x, board_y, board_size)
+        draw_chessboard(match_boards[key], board_x, board_y, board_size,
+                        preview_group["targets"] if preview_group else (),
+                        preview_group["square"] if preview_group else None)
         stats = match_stats.get(key, {})
         info_x = board_x + board_size + 22
         game = match_boards[key]
@@ -626,13 +680,28 @@ def draw_match_screen(w, h):
             draw_text(screen, f"Nodes: {current_nodes:,}  Leaves: {current_leaves:,}", info_x, board_y + 306, TINY, MUTED)
             draw_text(screen, f"Cutoffs: {current_cutoffs:,}  Skipped: {current_pruned:,}", info_x, board_y + 326, TINY, MUTED)
             draw_text(screen, f"Wall time: {current_elapsed:.1f}s", info_x, board_y + 346, TINY, MUTED)
-        draw_text(screen, "Current branch (SAN)", board_x, board_y + board_size + 18, SMALL, MUTED)
+        history_top = board_y + board_size + 52
+        draw_text(screen, "Current branch (SAN)", board_x, history_top, SMALL, MUTED)
         history = san_history(game)
-        for row, move in enumerate(history[-8:]):
-            ply_index = len(history) - min(8, len(history)) + row
+        visible_rows = min(8, max(0, (panel.bottom - history_top - 25) // 18))
+        for row, move in enumerate(history[-visible_rows:] if visible_rows else []):
+            ply_index = len(history) - min(visible_rows, len(history)) + row
             label = f"{ply_index // 2 + 1}. " if ply_index % 2 == 0 else "   "
-            draw_text(screen, label + move, board_x, board_y + board_size + 41 + row * 18,
+            draw_text(screen, label + move, board_x, history_top + 23 + row * 18,
                       TINY, GOLD if row == min(7, len(history) - 1) else TEXT)
+
+    board_y = top + 58
+    move_bar_y = board_y + board_size + 12
+    moves_taken = max(0, match_game_board.ply() - match_start_ply)
+    draw_text(screen, f"MOVES TAKEN  {moves_taken}", 24, move_bar_y, SMALL, GOLD)
+    bar_x, bar_width, bar_height = 205, max(120, w - 230), 18
+    pygame.draw.rect(screen, PANEL2, pygame.Rect(bar_x, move_bar_y + 1, bar_width, bar_height), border_radius=7)
+    filled_width = min(bar_width, int(bar_width * min(moves_taken, 20) / 20))
+    if filled_width:
+        pygame.draw.rect(screen, BLUE, pygame.Rect(bar_x, move_bar_y + 1, filled_width, bar_height), border_radius=7)
+    for tick in range(1, 20):
+        x = bar_x + int(bar_width * tick / 20)
+        pygame.draw.line(screen, BG, (x, move_bar_y + 3), (x, move_bar_y + bar_height - 2), 1)
 
 
 def request_engine_move():
@@ -691,6 +760,7 @@ def main():
     global search_depth, result, busy, message, mode, screen, game_board, selected_square, legal_targets, engine_busy, game_message
     global stockfish_depth, comparison_board, comparison_name, fen_editing, fen_buffer, fen_error, tree_selection, history_scroll
     global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_acks, match_ack_release_at
+    global match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_next_at, match_preview_done_ack
     global minimax_busy, minimax_cancel, minimax_result, minimax_candidates, minimax_root_fen, minimax_apply_at, minimax_progress, minimax_thread
     running = True
     while running:
@@ -802,8 +872,8 @@ def main():
                             result = None
                             tree_selection = None
                         elif key == "midgame" and not busy:
-                            comparison_board = chess.Board("8/5pk1/6p1/2r5/3R4/5P2/5KPP/8 w - - 0 35")
-                            comparison_name = "Late rook endgame"
+                            comparison_board = chess.Board("7k/8/5KQ1/8/8/8/8/8 w - - 0 35")
+                            comparison_name = "Near-mate queen endgame"
                             result = None
                             tree_selection = None
                         elif key == "preset" and not busy:
@@ -895,7 +965,18 @@ def main():
                 game_message = f"Minimax error: {payload}" if status == "error" else "Minimax search cancelled."
         while not match_queue.empty():
             status, payload = match_queue.get()
-            if status == "match_progress":
+            if status == "move_preview":
+                root_fen, match_preview_groups, preview_ack = payload
+                match_preview_done_ack = preview_ack
+                match_preview_index = 0
+                match_boards = {key: chess.Board(root_fen) for key in ("minimax", "alpha_beta")}
+                match_preview_active = bool(match_preview_groups)
+                match_preview_next_at = time.monotonic() + MATCH_PREVIEW_INTERVAL
+                if match_preview_active:
+                    match_message = move_preview_message(match_preview_groups, match_preview_index)
+                else:
+                    preview_ack.set()
+            elif status == "match_progress":
                 key, visited, leaves, cutoffs, pruned, elapsed = payload
                 if key in match_stats:
                     match_stats[key]["current"] = (visited, leaves, cutoffs, pruned, elapsed)
@@ -920,7 +1001,7 @@ def main():
                 match_cursor_bounds[key] = (alpha, beta)
                 match_stats[key]["current"] = (visited, leaves, cutoffs, pruned, elapsed)
                 match_pending_acks.append(acknowledgement)
-                match_ack_release_at = max(match_ack_release_at, time.perf_counter() + 0.06)
+                match_ack_release_at = max(match_ack_release_at, time.perf_counter() + MATCH_ACK_INTERVAL)
             elif status == "search_done":
                 key, best_uci, best_san, item = payload
                 stats = match_stats[key]
@@ -945,6 +1026,7 @@ def main():
                 match_message = f"Both scores agree. Minimax's {san} advances the shared game; Alpha-Beta searches the next position."
             elif status == "match_done":
                 match_running = False
+                match_preview_active = False
                 outcome, termination = payload
                 match_boards = {key: match_game_board.copy(stack=True) for key in ("minimax", "alpha_beta")}
                 match_active_algorithm = None
@@ -952,13 +1034,26 @@ def main():
                 match_message = f"Shared game ended {outcome} ({termination.replace('_', ' ').lower()}). Statistics are final."
             elif status == "match_cancelled":
                 match_running = False
+                match_preview_active = False
                 match_active_algorithm = None
                 match_searching_algorithms.clear()
                 match_message = "Games stopped. Partial games and accumulated statistics are retained."
             elif status == "match_error":
                 match_running = False
+                match_preview_active = False
                 match_active_algorithm = None
                 match_message = f"Game search error: {payload}"
+        if match_preview_active and time.monotonic() >= match_preview_next_at:
+            match_preview_index += 1
+            if match_preview_index >= len(match_preview_groups):
+                match_preview_active = False
+                if match_preview_done_ack:
+                    match_preview_done_ack.set()
+                    match_preview_done_ack = None
+                match_message = "Legal moves shown. Minimax and Alpha-Beta are starting their searches."
+            else:
+                match_preview_next_at = time.monotonic() + MATCH_PREVIEW_INTERVAL
+                match_message = move_preview_message(match_preview_groups, match_preview_index)
         draw()
         pygame.display.flip()
         clock.tick(60)
@@ -993,6 +1088,8 @@ def main():
     match_pending_acks.clear()
     if match_thread and match_thread.is_alive():
         match_thread.join()
+    if match_preview_done_ack:
+        match_preview_done_ack.set()
     if minimax_cancel:
         minimax_cancel.set()
     if minimax_thread and minimax_thread.is_alive():
