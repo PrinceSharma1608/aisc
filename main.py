@@ -1,6 +1,7 @@
 """Chess Arena: visual comparison of Minimax and Alpha-Beta search trees."""
 import math
 import queue
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +24,42 @@ RED = (239, 91, 111)
 GOLD = (255, 198, 88)
 PURPLE = (174, 139, 255)
 
+
+_position_random = random.SystemRandom()
+_seen_comparison_positions = set()
+_comparison_position_number = 0
+
+
+def new_comparison_position():
+    """Choose a fresh, legal KQ-v-K position with a mate-in-one for a short demo."""
+    global _comparison_position_number
+    for _ in range(20_000):
+        black_king, white_king, white_queen = _position_random.sample(range(64), 3)
+        board = chess.Board(None)
+        board.set_piece_at(black_king, chess.Piece(chess.KING, chess.BLACK))
+        board.set_piece_at(white_king, chess.Piece(chess.KING, chess.WHITE))
+        board.set_piece_at(white_queen, chess.Piece(chess.QUEEN, chess.WHITE))
+        board.turn = chess.WHITE
+        board.fullmove_number = 35
+        if not board.is_valid() or board.is_check():
+            continue
+        fen = board.fen()
+        if fen in _seen_comparison_positions:
+            continue
+        for move in list(board.legal_moves):
+            board.push(move)
+            is_mate = board.is_checkmate()
+            board.pop()
+            if is_mate:
+                _seen_comparison_positions.add(fen)
+                _comparison_position_number += 1
+                return board, f"Near-mate position {_comparison_position_number}"
+    # Keep startup reliable if a future rules-library version changes validity checks.
+    board = chess.Board("7k/8/5KQ1/8/8/8/8/8 w - - 0 35")
+    _comparison_position_number += 1
+    return board, f"Near-mate position {_comparison_position_number}"
+
+
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
 pygame.display.set_caption("Chess Arena | Minimax vs Alpha-Beta")
@@ -44,8 +81,7 @@ tree_hitboxes = []
 selected_node = None
 mode = "menu"
 game_board = new_game()
-comparison_board = chess.Board("7k/8/5KQ1/8/8/8/8/8 w - - 0 35")
-comparison_name = "Near-mate queen endgame"
+comparison_board, comparison_name = new_comparison_position()
 fen_editing = False
 fen_buffer = ""
 fen_error = ""
@@ -476,7 +512,7 @@ def draw():
     button("standard", pygame.Rect(position_x, position_y, 105, 35), "Standard", enabled=controls_enabled)
     button("preset", pygame.Rect(position_x + 112, position_y, 115, 35), "Endgame", enabled=controls_enabled)
     button("fen", pygame.Rect(position_x + 234, position_y, 115, 35), "Enter FEN", active=fen_editing, enabled=controls_enabled)
-    button("midgame", pygame.Rect(position_x + 356, position_y, 115, 35), "Near mate", enabled=controls_enabled)
+    button("midgame", pygame.Rect(position_x + 356, position_y, 115, 35), "New position", enabled=controls_enabled)
     if w >= 1200:
         draw_text(screen, fit(f"Position: {comparison_name}", SMALL, max(120, w - 1050)), 1040, 111, SMALL, MUTED)
     else:
@@ -515,8 +551,16 @@ def draw():
     else:
         for rect, title, accent, sub in [(left, "PLAIN MINIMAX", BLUE, "All branches explored to the selected depth"), (right, "MINIMAX + ALPHA-BETA", GREEN, "Cutoffs and pruned branches shown in red")]:
             rounded(screen, rect)
-            centered(screen, title, rect.centerx, rect.centery - 24, MED, accent)
-            centered(screen, sub, rect.centerx, rect.centery + 8, SMALL, MUTED)
+            draw_text(screen, title, rect.x + 18, rect.y + 14, MED, accent)
+            draw_text(screen, fit(f"Visible start: {comparison_name}", SMALL, rect.width - 36),
+                      rect.x + 18, rect.y + 50, SMALL, MUTED)
+            preview_size = max(100, min(220, rect.width - 48, rect.height - 145))
+            preview_x = rect.centerx - preview_size // 2
+            preview_y = rect.y + 82
+            draw_chessboard(comparison_board, preview_x, preview_y, preview_size)
+            centered(screen, "Both searches use this same position", rect.centerx,
+                     preview_y + preview_size + 18, SMALL, TEXT)
+            centered(screen, sub, rect.centerx, preview_y + preview_size + 44, TINY, MUTED)
     footer = pygame.Rect(margin, h - footer_h - 10, w - 2 * margin, footer_h)
     rounded(screen, footer)
     draw_text(screen, "LEGEND", footer.x + 12, footer.y + 10, SMALL, MUTED)
@@ -815,6 +859,10 @@ def main():
                         elif key == "compare":
                             mode = "compare"
                             comparison_view = "dashboard"
+                            comparison_board, comparison_name = new_comparison_position()
+                            result = None
+                            tree_selection = None
+                            message = f"Previewing {comparison_name}. Both algorithms will use this same position."
                         elif key == "match" and mode == "compare":
                             if match_running:
                                 comparison_view = "match"
@@ -872,10 +920,10 @@ def main():
                             result = None
                             tree_selection = None
                         elif key == "midgame" and not busy:
-                            comparison_board = chess.Board("7k/8/5KQ1/8/8/8/8/8 w - - 0 35")
-                            comparison_name = "Near-mate queen endgame"
+                            comparison_board, comparison_name = new_comparison_position()
                             result = None
                             tree_selection = None
+                            message = f"Selected a fresh legal position: {comparison_name}."
                         elif key == "preset" and not busy:
                             comparison_board = chess.Board("7k/6pp/8/8/8/8/6PP/7K w - - 0 1")
                             comparison_name = "King and pawn endgame"
