@@ -1,7 +1,11 @@
 """Regression checks for game interaction helpers."""
+import random
 import chess
+from ai import choose_varied_candidate
 
-from game_logic import legal_targets, material_balance, new_game, play_human_move, san_history, undo_last_turn
+from game_logic import (legal_targets, material_balance, new_game, new_randomized_game,
+                        new_random_reachable_position, play_human_move, san_history,
+                        undo_last_turn)
 
 
 def main():
@@ -23,6 +27,20 @@ def main():
     assert undo_last_turn(board) == 1
     assert board.fen() == chess.STARTING_FEN
     assert new_game().fen() == chess.STARTING_FEN
+    random_opening_a, random_opening_b = new_randomized_game(), new_randomized_game()
+    assert random_opening_a.is_valid() and random_opening_b.is_valid()
+    assert random_opening_a.turn == chess.WHITE and random_opening_b.turn == chess.WHITE
+    assert random_opening_a.fen() != random_opening_b.fen()
+    random_midgame_a = new_random_reachable_position(min_plies=18, max_plies=30)
+    random_midgame_b = new_random_reachable_position(min_plies=18, max_plies=30)
+    assert random_midgame_a.is_valid() and random_midgame_b.is_valid()
+    assert not random_midgame_a.is_game_over(claim_draw=True)
+    assert not random_midgame_b.is_game_over(claim_draw=True)
+    assert len(random_midgame_a.piece_map()) >= 10 and len(random_midgame_b.piece_map()) >= 10
+    assert random_midgame_a.fen() != random_midgame_b.fen()
+    choices = [{"score": 25, "san": "A"}, {"score": -40, "san": "B"},
+               {"score": -250, "san": "C"}]
+    assert choose_varied_candidate(choices, tolerance_cp=100, rng=random.Random(3)) in choices[:2]
     print("PASS: initial board, legal move rejection, SAN history, material balance, new game, and undo.")
 
 

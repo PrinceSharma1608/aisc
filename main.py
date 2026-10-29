@@ -7,11 +7,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pygame
 import chess
-from ai import analyze_candidates
-from comparison_ai import SearchCancelled, parse_fen, run_comparison, search_position
-from game_logic import legal_targets as game_legal_targets, material_balance, new_game, play_human_move, san_history, undo_last_turn
+from ai import analyze_candidates, choose_varied_candidate
+from comparison_ai import SearchCancelled, run_comparison, search_position
+from game_logic import (legal_targets as game_legal_targets, material_balance, new_game,
+                        new_randomized_game, new_random_reachable_position,
+                        play_human_move, san_history, undo_last_turn)
 
 WIDTH, HEIGHT = 1440, 900
+MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT = 1120, 720
 BG = (15, 19, 29)
 PANEL = (25, 32, 46)
 PANEL2 = (31, 40, 57)
@@ -26,7 +29,6 @@ PURPLE = (174, 139, 255)
 
 
 _position_random = random.SystemRandom()
-_seen_comparison_positions = set()
 _comparison_position_number = 0
 MATCH_DEPTH = 2
 DIFFICULTY_DEPTHS = {"Easy": 2, "Medium": 6, "Hard": 10}
@@ -35,50 +37,11 @@ SIMULATION_DEPTH = 2
 
 
 def new_comparison_position():
-    """Choose a fresh, legal 7–9 piece tactical position with a mate-in-one."""
+    """Choose a fresh, legal middlegame reached by randomized legal play."""
     global _comparison_position_number
-    core = ((chess.WHITE, chess.KING, chess.F6),
-            (chess.WHITE, chess.QUEEN, chess.G6),
-            (chess.BLACK, chess.KING, chess.H8))
-    optional_pieces = ((chess.WHITE, chess.ROOK), (chess.WHITE, chess.BISHOP),
-                       (chess.WHITE, chess.KNIGHT), (chess.BLACK, chess.ROOK),
-                       (chess.BLACK, chess.BISHOP), (chess.BLACK, chess.KNIGHT))
-    for _ in range(50_000):
-        flip_file, flip_rank = _position_random.choice((False, True)), _position_random.choice((False, True))
-        def transform(square):
-            file, rank = chess.square_file(square), chess.square_rank(square)
-            return chess.square(7 - file if flip_file else file, 7 - rank if flip_rank else rank)
-
-        board = chess.Board(None)
-        occupied = set()
-        for color, piece_type, square in core:
-            square = transform(square)
-            occupied.add(square)
-            board.set_piece_at(square, chess.Piece(piece_type, color))
-        extra_count = _position_random.randint(4, 6)
-        extras = _position_random.sample(optional_pieces, extra_count)
-        squares = _position_random.sample([sq for sq in chess.SQUARES if sq not in occupied], extra_count)
-        for (color, piece_type), square in zip(extras, squares):
-            board.set_piece_at(square, chess.Piece(piece_type, color))
-        board.turn = chess.WHITE
-        board.fullmove_number = 35
-        if not board.is_valid() or board.is_check():
-            continue
-        fen = board.fen()
-        if fen in _seen_comparison_positions:
-            continue
-        for move in list(board.legal_moves):
-            board.push(move)
-            is_mate = board.is_checkmate()
-            board.pop()
-            if is_mate:
-                _seen_comparison_positions.add(fen)
-                _comparison_position_number += 1
-                return board, f"Random tactical position {_comparison_position_number}"
-    # Valid 9-piece fallback: Qg7 is mate, with the extra pieces left on the board.
-    board = chess.Board("rn5k/b7/5KQ1/8/8/8/8/RBN5 w - - 0 35")
+    board = new_random_reachable_position(_position_random, min_plies=18, max_plies=40)
     _comparison_position_number += 1
-    return board, f"Tactical position {_comparison_position_number}"
+    return board, f"Random midgame {_comparison_position_number}"
 
 
 pygame.init()
@@ -103,9 +66,6 @@ selected_node = None
 mode = "menu"
 game_board = new_game()
 comparison_board, comparison_name = new_comparison_position()
-fen_editing = False
-fen_buffer = ""
-fen_error = ""
 stockfish_depth = 10
 tree_selection = None
 history_scroll = 0
@@ -584,7 +544,8 @@ def draw():
     if match_running:
         button("stop_match", pygame.Rect(w - 495, 18, 150, 35), "Stop games", enabled=True)
     button("menu", pygame.Rect(w - 165, 18, 145, 35), "Return to Menu", enabled=not busy and not match_running)
-    draw_text(screen, message, margin, 75, SMALL, GOLD if busy else GREEN if result else MUTED)
+    draw_text(screen, fit(message, SMALL, w - 2 * margin), margin, 75, SMALL,
+              GOLD if busy else GREEN if result else MUTED)
     controls_enabled = not busy and not match_running
     button("minus", pygame.Rect(margin, 101, 42, 35), "−", enabled=controls_enabled)
     button("depth", pygame.Rect(margin + 49, 101, 120, 35), f"Depth: {search_depth}", enabled=False)
@@ -593,16 +554,12 @@ def draw():
     button("reset", pygame.Rect(margin + 416, 101, 115, 35), "Reset", enabled=controls_enabled)
     position_y = 101 if w >= 1200 else 143
     position_x = 560 if w >= 1200 else 20
-    button("standard", pygame.Rect(position_x, position_y, 105, 35), "Standard", enabled=controls_enabled)
-    button("preset", pygame.Rect(position_x + 112, position_y, 115, 35), "Endgame", enabled=controls_enabled)
-    button("fen", pygame.Rect(position_x + 234, position_y, 115, 35), "Enter FEN", active=fen_editing, enabled=controls_enabled)
-    button("midgame", pygame.Rect(position_x + 356, position_y, 115, 35), "New position", enabled=controls_enabled)
+    button("midgame", pygame.Rect(position_x, position_y, 180, 35), "New random position", enabled=controls_enabled)
     if w >= 1200:
-        draw_text(screen, fit(f"Position: {comparison_name}", SMALL, max(120, w - 1050)), 1040, 111, SMALL, MUTED)
+        draw_text(screen, fit("Random legal midgame • both searches share this preview", SMALL, w - 755),
+                  750, 111, SMALL, MUTED)
     else:
-        draw_text(screen, fit(f"Position: {comparison_name}", SMALL, w - 40), 20, 179, SMALL, MUTED)
-    if search_depth >= 4:
-        draw_text(screen, "Depth 4 can take noticeably longer.", 560, 78, SMALL, GOLD)
+        draw_text(screen, fit("Random legal midgame • preview below", SMALL, w - 40), 20, 179, SMALL, MUTED)
     gap = 12
     compact = w < 1200
     card_y, card_h = (196 if compact else 150), 78
@@ -670,12 +627,6 @@ def draw():
     else:
         footer_text = "Same position • Same depth • Same evaluation • Same move ordering"
     draw_text(screen, fit(footer_text, SMALL, footer.width - 24), footer.x + 12, footer.y + 36, SMALL, MUTED)
-    if fen_editing:
-        overlay = pygame.Rect(40, h // 2 - 75, w - 80, 150)
-        rounded(screen, overlay, PANEL2, BLUE)
-        draw_text(screen, "Enter FEN, then press Enter (Esc cancels)", overlay.x + 18, overlay.y + 18, FONT)
-        draw_text(screen, fen_buffer or "", overlay.x + 18, overlay.y + 57, SMALL, TEXT)
-        draw_text(screen, fen_error, overlay.x + 18, overlay.y + 98, SMALL, RED)
 
 
 def draw_play_screen(w, h):
@@ -683,7 +634,8 @@ def draw_play_screen(w, h):
     buttons = {}
     draw_text(screen, "PLAY WITH STOCKFISH", 24, 18, TITLE)
     draw_text(screen, f"{selected_difficulty} • Stockfish depth {stockfish_depth}", 370, 28, SMALL, BLUE)
-    draw_text(screen, game_message, 26, 58, SMALL, GOLD if engine_busy or minimax_busy else GREEN if game_board.is_game_over() else MUTED)
+    draw_text(screen, fit(game_message, SMALL, w - 52), 26, 58, SMALL,
+              GOLD if engine_busy or minimax_busy else GREEN if game_board.is_game_over() else MUTED)
     button("new", pygame.Rect(24, 88, 125, 36), "New Game", enabled=not engine_busy and not minimax_busy and not simulation_active)
     button("undo", pygame.Rect(160, 88, 100, 36), "Undo", enabled=not engine_busy and not minimax_busy and not simulation_active and bool(game_board.move_stack))
     button("menu", pygame.Rect(271, 88, 145, 36), "Return to Menu", enabled=not engine_busy and not minimax_busy and not simulation_active)
@@ -740,7 +692,7 @@ def draw_play_screen(w, h):
         if is_best:
             detail += "   BEST — PLAYING NEXT"
         draw_text(screen, fit(detail, SMALL, area_w - 34), panel_x + 29, y + 3,
-                  SMALL, color if is_best else TEXT)
+                  SMALL, GOLD if is_best else TEXT)
     if minimax_busy:
         draw_text(screen, "Board markers 1–9 match these candidate moves.", panel_x, candidate_top + 9 * 27 + 4, TINY, MUTED)
     elif minimax_result:
@@ -774,9 +726,10 @@ def draw_match_screen(w, h):
     game_turn = "White" if match_game_board.turn else "Black"
     game_history = san_history(match_game_board)
     last_game_moves = " ".join(game_history[-8:]) if game_history else comparison_name
-    draw_text(screen, f"Game ply {match_game_board.ply()} • {game_turn} to move • Game: {last_game_moves}",
+    draw_text(screen, fit(f"{game_turn} to move • Game: {last_game_moves}", SMALL, w - 48),
               24, 72, SMALL, GOLD)
-    draw_text(screen, match_message, 24, 91, TINY, GOLD if match_running else GREEN)
+    draw_text(screen, fit(match_message, TINY, w - 48), 24, 91, TINY,
+              GOLD if match_running else GREEN)
     preview_group = (match_preview_groups[match_preview_index]
                      if match_preview_active and match_preview_index < len(match_preview_groups) else None)
     margin, gap, top = 20, 16, 116
@@ -792,8 +745,6 @@ def draw_match_screen(w, h):
                  + match_stats.get(key, {}).get("current", (0, 0, 0, 0, 0.0))[tuple_index]
             for key in ("minimax", "alpha_beta")
         }
-    metric_scales = {stat_key: max(1, *values.values()) for stat_key, values in metric_totals.items()}
-    moves_taken = max(0, match_game_board.ply() - match_start_ply)
     for index, (key, title, accent) in enumerate((
             ("minimax", "PLAIN MINIMAX", BLUE), ("alpha_beta", "ALPHA-BETA", GREEN))):
         panel = pygame.Rect(margin + index * (panel_w + gap), top, panel_w, panel_h)
@@ -815,54 +766,47 @@ def draw_match_screen(w, h):
                         preview_group["targets"] if preview_group else (),
                         preview_group["square"] if preview_group else None)
         info_x = board_x + board_size + 22
+        info_w = max(72, panel.right - info_x - 14)
         game = match_boards[key]
         current = stats.get("current", (0, 0, 0, 0, 0.0))
         current_nodes, current_leaves, current_cutoffs, current_pruned, current_elapsed = current
-        draw_text(screen, f"Search ply: {game.ply()}", info_x, board_y + 2, FONT)
-        draw_text(screen, f"Side: {'White' if game.turn else 'Black'}", info_x, board_y + 27, SMALL, MUTED)
+        draw_text(screen, fit(f"Side to move: {'White' if game.turn else 'Black'}", SMALL, info_w),
+                  info_x, board_y + 2, SMALL, MUTED)
         if stats.get("last_move", "—") != "—":
-            draw_text(screen, f"Best: {stats['last_move']}", info_x, board_y + 54, MED, GOLD)
-            draw_text(screen, f"Score: {format_search_score(stats['last_score'])}", info_x, board_y + 80, SMALL, MUTED)
+            draw_text(screen, fit(f"Last move: {stats['last_move']}", MED, info_w),
+                      info_x, board_y + 29, MED, GOLD)
         if game.is_game_over(claim_draw=True):
             outcome = game.outcome(claim_draw=True)
-            draw_text(screen, f"Finished: {game.result(claim_draw=True)}", info_x, board_y + 110, MED, GOLD)
+            draw_text(screen, fit(f"Finished: {game.result(claim_draw=True)}", MED, info_w),
+                      info_x, board_y + 56, MED, GOLD)
             if outcome:
-                draw_text(screen, outcome.termination.name.replace("_", " ").title(), info_x, board_y + 136, TINY, MUTED)
-        alpha, beta = match_cursor_bounds.get(key, (None, None))
-        draw_text(screen, f"α: {alpha}  β: {beta}", info_x, board_y + 108, TINY, PURPLE)
-        draw_text(screen, "SEARCH STATS • LIVE TOTAL", info_x, board_y + 144, SMALL, accent)
-        info_w = max(110, panel.right - info_x - 16)
-        label_w, value_w = 48, 48
-        bar_w = max(20, info_w - label_w - value_w - 12)
+                draw_text(screen, fit(outcome.termination.name.replace("_", " ").title(), TINY, info_w),
+                          info_x, board_y + 82, TINY, MUTED)
+        draw_text(screen, fit("SEARCH STATS • LIVE TOTAL", SMALL, info_w),
+                  info_x, board_y + 111, SMALL, accent)
         for row, (stat_key, _tuple_index, label) in enumerate(metric_specs):
-            y = board_y + 169 + row * 22
+            y = board_y + 137 + row * 22
             value = metric_totals[stat_key][key]
-            draw_text(screen, label, info_x, y - 2, TINY, MUTED)
-            bar_rect = pygame.Rect(info_x + label_w, y + 2, bar_w, 9)
-            pygame.draw.rect(screen, PANEL2, bar_rect, border_radius=4)
-            fill_w = int(bar_w * value / metric_scales[stat_key])
-            if fill_w:
-                pygame.draw.rect(screen, accent,
-                                 pygame.Rect(bar_rect.x, bar_rect.y, max(4, fill_w), bar_rect.height),
-                                 border_radius=4)
-            draw_text(screen, f"{value:,}", bar_rect.right + 6, y - 2, TINY, TEXT)
+            draw_text(screen, fit(f"{label}: {value:,}", SMALL, info_w), info_x, y - 2, SMALL, TEXT)
         if match_running:
-            draw_text(screen, "Current search", info_x, board_y + 262, SMALL, PURPLE)
-            draw_text(screen, f"Nodes {current_nodes:,} • leaves {current_leaves:,}", info_x, board_y + 284, TINY, MUTED)
-            draw_text(screen, f"Cutoffs {current_cutoffs:,} • pruned {current_pruned:,}", info_x, board_y + 304, TINY, MUTED)
+            draw_text(screen, fit("Current search", SMALL, info_w), info_x, board_y + 236, SMALL, PURPLE)
+            draw_text(screen, fit(f"Nodes: {current_nodes:,} • Leaves: {current_leaves:,}", TINY, info_w),
+                      info_x, board_y + 258, TINY, MUTED)
+            draw_text(screen, fit(f"Cutoffs: {current_cutoffs:,} • Pruned: {current_pruned:,}", TINY, info_w),
+                      info_x, board_y + 278, TINY, MUTED)
         live_wall_time = stats.get("wall_time", 0.0) + (current_elapsed if match_running else 0.0)
-        draw_text(screen, f"Total search wall time: {live_wall_time:.1f}s", info_x, board_y + 344,
-                  TINY, MUTED)
-        draw_text(screen, f"GAME PLIES  {moves_taken} / 24", board_x, board_y + board_size + 10,
-                  TINY, GOLD)
-        move_bar = pygame.Rect(board_x, board_y + board_size + 29, board_size, 12)
-        pygame.draw.rect(screen, PANEL2, move_bar, border_radius=5)
-        move_fill = int(move_bar.width * min(moves_taken, 24) / 24)
-        if move_fill:
+        draw_text(screen, fit(f"Total search time: {live_wall_time:.1f}s", TINY, info_w),
+                  info_x, board_y + 314, TINY, MUTED)
+        draw_text(screen, f"Search time {live_wall_time:.1f}s", board_x,
+                  board_y + board_size + 7, TINY, MUTED)
+        time_bar = pygame.Rect(board_x, board_y + board_size + 25, board_size, 9)
+        pygame.draw.rect(screen, PANEL2, time_bar, border_radius=5)
+        time_fill = int(time_bar.width * min(1.0, live_wall_time / 60.0))
+        if time_fill:
             pygame.draw.rect(screen, accent,
-                             pygame.Rect(move_bar.x, move_bar.y, max(5, move_fill), move_bar.height),
+                             pygame.Rect(time_bar.x, time_bar.y, max(5, time_fill), time_bar.height),
                              border_radius=5)
-        history_top = board_y + board_size + 53
+        history_top = board_y + board_size + 43
         draw_text(screen, "Current branch (SAN)", board_x, history_top, SMALL, MUTED)
         history = san_history(game)
         visible_rows = min(8, max(0, (panel.bottom - history_top - 25) // 18))
@@ -880,7 +824,11 @@ def request_engine_move():
     snapshot = game_board.copy(stack=True)
     def task():
         try:
-            engine_queue.put(("ok", analyze_candidates(snapshot, depth=depth, multipv=1)))
+            candidates = analyze_candidates(snapshot, depth=depth, multipv=4)
+            chosen = choose_varied_candidate(candidates)
+            if chosen:
+                candidates = [chosen] + [candidate for candidate in candidates if candidate is not chosen]
+            engine_queue.put(("ok", candidates))
         except Exception as exc:
             engine_queue.put(("error", str(exc)))
     engine_thread = threading.Thread(target=task, daemon=False)
@@ -928,7 +876,7 @@ def start_minimax_turn():
 def main():
     global search_depth, result, busy, message, mode, screen, game_board, selected_square, legal_targets, engine_busy, game_message
     global selected_difficulty, stockfish_depth, simulation_active
-    global comparison_board, comparison_name, fen_editing, fen_buffer, fen_error, tree_selection, history_scroll
+    global comparison_board, comparison_name, tree_selection, history_scroll
     global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_acks, match_ack_release_at
     global match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_next_at, match_preview_done_ack
     global minimax_busy, minimax_cancel, minimax_result, minimax_candidates, minimax_root_fen, minimax_apply_at, minimax_progress, minimax_thread
@@ -939,24 +887,8 @@ def main():
                 running = False
                 simulation_active = False
             elif event.type == pygame.VIDEORESIZE:
-                screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
-            elif event.type == pygame.TEXTINPUT and fen_editing:
-                fen_buffer += event.text
-            elif event.type == pygame.KEYDOWN and fen_editing:
-                if event.key == pygame.K_ESCAPE:
-                    fen_editing, fen_error = False, ""
-                elif event.key == pygame.K_BACKSPACE:
-                    fen_buffer = fen_buffer[:-1]
-                elif event.key == pygame.K_RETURN:
-                    try:
-                        candidate_board = parse_fen(fen_buffer)
-                        comparison_board = candidate_board
-                        comparison_name = "Custom FEN"
-                        tree_selection = None
-                        result = None
-                        fen_editing, fen_error = False, ""
-                    except ValueError as exc:
-                        fen_error = str(exc)
+                size = (max(MIN_WINDOW_WIDTH, event.w), max(MIN_WINDOW_HEIGHT, event.h))
+                screen = pygame.display.set_mode(size, pygame.RESIZABLE)
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 if mode != "menu" and not engine_busy and not minimax_busy and not busy and not match_running:
                     mode = "menu"
@@ -968,8 +900,8 @@ def main():
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5) and mode == "play":
                 max_scroll = max(0, (len(game_board.move_stack) + 1) // 2 - 9)
                 history_scroll = max(0, min(max_scroll, history_scroll + (1 if event.button == 4 else -1)))
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not fen_editing:
-                if mode == "compare" and result and not fen_editing:
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if mode == "compare" and result:
                     for hitbox, tree_key, node in tree_hitboxes:
                         if hitbox.collidepoint(event.pos):
                             tree_selection = (tree_key, node["id"])
@@ -986,9 +918,9 @@ def main():
                             stockfish_depth = DIFFICULTY_DEPTHS[selected_difficulty]
                             simulation_active = False
                             mode = "play"
-                            game_board = new_game()
+                            game_board = new_randomized_game(_position_random)
                             history_scroll = 0
-                            game_message = "Your move — White to play."
+                            game_message = "Fresh randomized opening — White to play."
                             minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                         elif key == "difficulty_back":
                             mode = "menu"
@@ -1002,11 +934,6 @@ def main():
                         elif key == "match" and mode == "compare":
                             if match_running:
                                 comparison_view = "match"
-                            elif not comparison_name.startswith(("Random tactical position", "Tactical position")):
-                                comparison_board, comparison_name = new_comparison_position()
-                                tree_selection = None
-                                message = (f"Fresh {comparison_name} loaded ({len(comparison_board.piece_map())} pieces). "
-                                           "Review the preview, then click Visualize game to start.")
                             else:
                                 start_parallel_games()
                         elif key in ("stop_match", "match_stop"):
@@ -1052,10 +979,10 @@ def main():
                             selected_square, legal_targets = None, []
                         elif key == "new" and not engine_busy and not minimax_busy:
                             simulation_active = False
-                            game_board = new_game()
+                            game_board = new_randomized_game(_position_random)
                             selected_square, legal_targets = None, []
                             minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
-                            game_message = "New game — White to play."
+                            game_message = "Fresh randomized opening — White to play."
                         elif key == "undo" and game_board.move_stack and not engine_busy and not minimax_busy:
                             undo_last_turn(game_board)
                             selected_square, legal_targets = None, []
@@ -1071,25 +998,11 @@ def main():
                             result = None
                             tree_selection = None
                             message = f"Reset comparison view at {comparison_name}."
-                        elif key == "standard" and not busy:
-                            comparison_board = chess.Board()
-                            comparison_name = "Standard starting position"
-                            result = None
-                            tree_selection = None
                         elif key == "midgame" and not busy:
                             comparison_board, comparison_name = new_comparison_position()
                             result = None
                             tree_selection = None
                             message = f"Selected a fresh legal position: {comparison_name}."
-                        elif key == "preset" and not busy:
-                            comparison_board = chess.Board("7k/6pp/8/8/8/8/6PP/7K w - - 0 1")
-                            comparison_name = "King and pawn endgame"
-                            result = None
-                            tree_selection = None
-                        elif key == "fen" and not busy:
-                            fen_editing = True
-                            fen_buffer = comparison_board.fen()
-                            fen_error = ""
                         break
                 else:
                     if mode == "play" and not engine_busy and not minimax_busy and not simulation_active and not game_board.is_game_over(claim_draw=True):
@@ -1233,7 +1146,7 @@ def main():
                 stats["turn_done"] = True
                 stats["current"] = (0, 0, 0, 0, 0.0)
                 match_searching_algorithms.discard(key)
-                match_message = f"{key.replace('_', ' ').title()} finished search: {best_san}, {format_search_score(item['best_score'])}."
+                match_message = f"{key.replace('_', ' ').title()} finished searching: {best_san}."
                 if all(match_stats[algo].get("turn_done") for algo in ("minimax", "alpha_beta")):
                     minimax_time = match_stats["minimax"]["last_search_wall_time"]
                     alpha_beta_time = match_stats["alpha_beta"]["last_search_wall_time"]
@@ -1253,7 +1166,7 @@ def main():
                 match_boards = {key: match_game_board.copy(stack=True) for key in ("minimax", "alpha_beta")}
                 match_active_algorithm = None
                 match_searching_algorithms.clear()
-                match_message = f"Both scores agree. Minimax's {san} advances the shared game; Alpha-Beta searches the next position."
+                match_message = f"Both searches completed. {san} advances the shared game; they now search the next position."
             elif status == "match_done":
                 match_running = False
                 match_preview_active = False
@@ -1270,7 +1183,7 @@ def main():
                               f"{match_stats['alpha_beta'].get('last_search_pruned', 0):,} moves.")
                 elif minimax_time or alpha_beta_time:
                     faster = (f" Search times: Minimax {minimax_time:.2f}s, Alpha-Beta {alpha_beta_time:.2f}s; "
-                              "compare node and pruning bars in the two panels.")
+                              "compare the numeric node and pruning totals in the two panels.")
                 else:
                     faster = ""
                 match_message = (f"Game ended {outcome} ({termination.replace('_', ' ').lower()})."

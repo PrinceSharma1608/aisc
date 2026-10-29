@@ -1,5 +1,6 @@
 
 from pathlib import Path
+import random
 import chess
 import chess.engine
 
@@ -44,6 +45,20 @@ def analyze_candidates(board: chess.Board, depth: int = 10, multipv: int = 3):
 def get_best_move(board: chess.Board, depth: int = 10):
     candidates = analyze_candidates(board, depth=depth, multipv=1)
     return candidates[0]["move"] if candidates else None
+
+
+def choose_varied_candidate(candidates, tolerance_cp: int = 180, rng=None):
+    """Randomly choose among near-best engine lines to avoid repeatable games."""
+    if not candidates:
+        return None
+    rng = rng or random.SystemRandom()
+    scored = [candidate for candidate in candidates if candidate.get("score") is not None]
+    if not scored:
+        return candidates[0]
+    best_score = max(candidate["score"] for candidate in scored)
+    near_best = [candidate for candidate in scored
+                 if candidate["score"] >= best_score - max(0, tolerance_cp)]
+    return rng.choice(near_best or [scored[0]])
 
 
 def choose_move(board: chess.Board, depth: int = 10):
