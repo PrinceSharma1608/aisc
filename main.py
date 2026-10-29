@@ -10,7 +10,7 @@ import chess
 from ai import StockfishSession, choose_varied_candidate
 from comparison_ai import SearchCancelled, run_comparison, search_position
 from game_logic import (legal_targets as game_legal_targets, material_balance, new_game,
-                        new_randomized_game, new_random_reachable_position,
+                        new_random_endgame_position, new_randomized_game,
                         play_human_move, san_history, undo_last_turn)
 
 WIDTH, HEIGHT = 1440, 900
@@ -37,11 +37,11 @@ SIMULATION_DEPTH = 2
 
 
 def new_comparison_position():
-    """Choose a fresh, legal middlegame reached by randomized legal play."""
+    """Choose a fresh, legal 5–6 piece endgame reached by randomized legal play."""
     global _comparison_position_number
-    board = new_random_reachable_position(_position_random, min_plies=18, max_plies=40)
+    board = new_random_endgame_position(_position_random)
     _comparison_position_number += 1
-    return board, f"Random midgame {_comparison_position_number}"
+    return board, f"Random endgame {_comparison_position_number}"
 
 
 pygame.init()
@@ -91,8 +91,9 @@ match_preview_groups = []
 match_preview_index = 0
 match_preview_next_at = 0.0
 match_preview_done_ack = None
-MATCH_PREVIEW_INTERVAL = 0.42
-MATCH_ACK_INTERVAL = 0.025
+MATCH_PREVIEW_INTERVAL = 0.12
+MATCH_CURSOR_INTERVAL = 0.04
+MATCH_ACK_INTERVAL = 0.005
 PIECE_GLYPHS = {
     (chess.WHITE, chess.KING): "♔", (chess.WHITE, chess.QUEEN): "♕", (chess.WHITE, chess.ROOK): "♖",
     (chess.WHITE, chess.BISHOP): "♗", (chess.WHITE, chess.KNIGHT): "♘", (chess.WHITE, chess.PAWN): "♙",
@@ -271,6 +272,7 @@ def start_parallel_games():
 
         def run_algorithm(key, root, root_fen):
             started = time.perf_counter()
+            last_cursor_at = [0.0]
 
             def progress(visited, leaves, cutoffs, pruned):
                 if cancel_event.is_set():
@@ -282,6 +284,9 @@ def start_parallel_games():
                 if cancel_event.is_set():
                     raise SearchCancelled()
                 now = time.perf_counter()
+                if now - last_cursor_at[0] < MATCH_CURSOR_INTERVAL:
+                    return
+                last_cursor_at[0] = now
                 acknowledgement = threading.Event()
                 match_queue.put(("match_cursor", (key, root_fen, path, ply, alpha, beta,
                     visited, leaves, cutoffs, pruned, now - started, acknowledgement)))
@@ -563,10 +568,10 @@ def draw():
     position_x = 560 if w >= 1200 else 20
     button("midgame", pygame.Rect(position_x, position_y, 180, 35), "New random position", enabled=controls_enabled)
     if w >= 1200:
-        draw_text(screen, fit("Random legal midgame • both searches share this preview", SMALL, w - 755),
+        draw_text(screen, fit("Random legal endgame • both searches share this preview", SMALL, w - 755),
                   750, 111, SMALL, MUTED)
     else:
-        draw_text(screen, fit("Random legal midgame • preview below", SMALL, w - 40), 20, 179, SMALL, MUTED)
+        draw_text(screen, fit("Random legal endgame • preview below", SMALL, w - 40), 20, 179, SMALL, MUTED)
     gap = 12
     compact = w < 1200
     card_y, card_h = (196 if compact else 150), 78

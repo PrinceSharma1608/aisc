@@ -61,37 +61,40 @@ def new_randomized_game(rng=None, min_plies: int = 6, max_plies: int = 16) -> ch
             return board
 
 
-def new_random_reachable_position(rng=None, min_plies: int = 14,
-                                  max_plies: int = 40) -> chess.Board:
-    """Create a unique, non-terminal middlegame reached by legal random play."""
+def new_random_endgame_position(rng=None, max_plies: int = 250) -> chess.Board:
+    """Play random legal games until a fresh, natural 5–6 piece endgame appears."""
     rng = rng or random.SystemRandom()
-    min_plies = max(1, int(min_plies))
-    max_plies = max(min_plies, int(max_plies))
-    for _ in range(100):
+    max_plies = max(40, int(max_plies))
+    for _ in range(200):
         board = chess.Board()
-        target_plies = rng.randint(min_plies, max_plies)
-        for _ in range(target_plies):
+        target_pieces = rng.choice((5, 6))
+        for _ in range(max_plies):
             if board.is_game_over(claim_draw=True):
                 break
-            board.push(rng.choice(list(board.legal_moves)))
-        position = _position_signature(board)
-        if (len(board.piece_map()) >= 10 and not board.is_game_over(claim_draw=True)
-                and position not in _random_start_positions):
-            _random_start_positions.add(position)
-            return board
-    fallback_rng = random.SystemRandom()
-    while True:
-        board = chess.Board()
-        target_plies = fallback_rng.randint(min_plies, max_plies)
-        for _ in range(target_plies):
-            if board.is_game_over(claim_draw=True):
-                break
-            board.push(fallback_rng.choice(list(board.legal_moves)))
-        position = _position_signature(board)
-        if (len(board.piece_map()) >= 10 and not board.is_game_over(claim_draw=True)
-                and position not in _random_start_positions):
-            _random_start_positions.add(position)
-            return board
+            moves = list(board.legal_moves)
+            captures = [move for move in moves if board.is_capture(move)]
+            move = rng.choice(captures) if captures and rng.random() < 0.82 else rng.choice(moves)
+            board.push(move)
+            pieces_left = len(board.piece_map())
+            if (pieces_left == target_pieces and not board.is_game_over(claim_draw=True)
+                    and not board.is_check() and not _has_mate_in_one(board)):
+                position = _position_signature(board)
+                if position not in _random_start_positions:
+                    _random_start_positions.add(position)
+                    return board
+    # A separate entropy source avoids repeating positions if a caller injects
+    # a deterministic RNG during tests or a future custom setup.
+    return new_random_endgame_position(random.SystemRandom(), max_plies)
+
+
+def _has_mate_in_one(board: chess.Board) -> bool:
+    for move in list(board.legal_moves):
+        board.push(move)
+        is_mate = board.is_checkmate()
+        board.pop()
+        if is_mate:
+            return True
+    return False
 
 
 def legal_targets(board: chess.Board, from_square: chess.Square,

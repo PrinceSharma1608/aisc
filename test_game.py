@@ -4,7 +4,7 @@ import chess
 from ai import choose_varied_candidate
 
 from game_logic import (legal_targets, material_balance, new_game, new_randomized_game,
-                        new_random_reachable_position, play_human_move, san_history,
+                        new_random_endgame_position, play_human_move, san_history,
                         undo_last_turn)
 
 
@@ -31,13 +31,17 @@ def main():
     assert random_opening_a.is_valid() and random_opening_b.is_valid()
     assert random_opening_a.turn == chess.WHITE and random_opening_b.turn == chess.WHITE
     assert random_opening_a.fen() != random_opening_b.fen()
-    random_midgame_a = new_random_reachable_position(min_plies=18, max_plies=30)
-    random_midgame_b = new_random_reachable_position(min_plies=18, max_plies=30)
-    assert random_midgame_a.is_valid() and random_midgame_b.is_valid()
-    assert not random_midgame_a.is_game_over(claim_draw=True)
-    assert not random_midgame_b.is_game_over(claim_draw=True)
-    assert len(random_midgame_a.piece_map()) >= 10 and len(random_midgame_b.piece_map()) >= 10
-    assert random_midgame_a.fen() != random_midgame_b.fen()
+    random_endgame_a = new_random_endgame_position()
+    random_endgame_b = new_random_endgame_position()
+    for endgame in (random_endgame_a, random_endgame_b):
+        assert endgame.is_valid() and not endgame.is_check()
+        assert len(endgame.piece_map()) in (5, 6)
+        assert endgame.root().fen() == chess.STARTING_FEN
+        for move in list(endgame.legal_moves):
+            endgame.push(move)
+            assert not endgame.is_checkmate(), "Endgame generator created a forced mate in one."
+            endgame.pop()
+    assert random_endgame_a.fen() != random_endgame_b.fen()
     choices = [{"score": 25, "san": "A"}, {"score": -40, "san": "B"},
                {"score": -250, "san": "C"}]
     assert choose_varied_candidate(choices, tolerance_cp=100, rng=random.Random(3)) in choices[:2]
