@@ -41,7 +41,11 @@ def main():
     choices = [{"score": 25, "san": "A"}, {"score": -40, "san": "B"},
                {"score": -250, "san": "C"}]
     assert choose_varied_candidate(choices, tolerance_cp=100, rng=random.Random(3)) in choices[:2]
-    print("PASS: initial board, legal move rejection, SAN history, material balance, new game, and undo.")
+    selected = {choose_varied_candidate(choices, tolerance_cp=100, rng=random.Random(seed))["san"]
+                for seed in range(20)}
+    assert selected == {"A", "B"}
+    assert choose_varied_candidate([]) is None
+    print("PASS: legal move helpers, fresh randomized starts, near-best Stockfish variation, SAN history, and undo.")
 
 
 if __name__ == "__main__":

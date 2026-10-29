@@ -1,6 +1,7 @@
 
 from pathlib import Path
 import random
+import threading
 import chess
 import chess.engine
 
@@ -8,38 +9,67 @@ PROJECT_DIR = Path(__file__).resolve().parent
 STOCKFISH_PATH = PROJECT_DIR / "stockfish-windows-x86-64-universal.exe"
 
 
+def _parse_analysis(board: chess.Board, infos):
+    if isinstance(infos, dict):
+        infos = [infos]
+    candidates = []
+    for info in infos:
+        pv = info.get("pv", [])
+        if not pv:
+            continue
+        move = pv[0]
+        score_obj = info["score"].pov(board.turn)
+        mate = score_obj.mate()
+        score = score_obj.score(mate_score=100000)
+        temp = board.copy(stack=False)
+        san = temp.san(move)
+        pv_san = []
+        for pv_move in pv:
+            pv_san.append(temp.san(pv_move))
+            temp.push(pv_move)
+        candidates.append({"move": move, "san": san, "score": score, "mate": mate,
+                           "pv": pv_san})
+    return candidates
+
+
+class StockfishSession:
+    """Reusable Stockfish process for a sequence of UI moves or self-play."""
+
+    def __init__(self):
+        if not STOCKFISH_PATH.is_file():
+            raise FileNotFoundError(f"Stockfish executable not found: {STOCKFISH_PATH}")
+        self.engine = chess.engine.SimpleEngine.popen_uci(str(STOCKFISH_PATH))
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def analyze_candidates(self, board: chess.Board, depth: int = 10, multipv: int = 3):
+        if board.is_game_over(claim_draw=True):
+            return []
+        multipv = max(1, min(int(multipv), board.legal_moves.count()))
+        with self._lock:
+            infos = self.engine.analyse(
+                board, chess.engine.Limit(depth=max(1, int(depth))), multipv=multipv)
+        return _parse_analysis(board, infos)
+
+    def close(self):
+        with self._lock:
+            if self.engine is not None:
+                engine, self.engine = self.engine, None
+                try:
+                    engine.quit()
+                except (chess.engine.EngineError, OSError):
+                    pass
+
+
 def analyze_candidates(board: chess.Board, depth: int = 10, multipv: int = 3):
-    """Return candidate move dictionaries with SAN, score and principal variation."""
-    if not STOCKFISH_PATH.is_file():
-        raise FileNotFoundError(f"Stockfish executable not found: {STOCKFISH_PATH}")
-    if board.is_game_over(claim_draw=True):
-        return []
-    multipv = max(1, min(int(multipv), board.legal_moves.count()))
-    engine = chess.engine.SimpleEngine.popen_uci(str(STOCKFISH_PATH))
-    try:
-        infos = engine.analyse(board, chess.engine.Limit(depth=max(1, int(depth))), multipv=multipv)
-        if isinstance(infos, dict):
-            infos = [infos]
-        candidates = []
-        for info in infos:
-            pv = info.get("pv", [])
-            if not pv:
-                continue
-            move = pv[0]
-            score_obj = info["score"].pov(board.turn)
-            mate = score_obj.mate()
-            score = score_obj.score(mate_score=100000)
-            temp = board.copy(stack=False)
-            san = temp.san(move)
-            pv_san = []
-            for pv_move in pv:
-                pv_san.append(temp.san(pv_move))
-                temp.push(pv_move)
-            candidates.append({"move": move, "san": san, "score": score, "mate": mate,
-                               "pv": pv_san})
-        return candidates
-    finally:
-        engine.quit()
+    """Analyze once and close the temporary Stockfish process."""
+    with StockfishSession() as session:
+        return session.analyze_candidates(board, depth=depth, multipv=multipv)
 
 
 def get_best_move(board: chess.Board, depth: int = 10):
@@ -47,7 +77,7 @@ def get_best_move(board: chess.Board, depth: int = 10):
     return candidates[0]["move"] if candidates else None
 
 
-def choose_varied_candidate(candidates, tolerance_cp: int = 180, rng=None):
+def choose_varied_candidate(candidates, tolerance_cp: int = 250, rng=None):
     """Randomly choose among near-best engine lines to avoid repeatable games."""
     if not candidates:
         return None

@@ -5,6 +5,11 @@ import chess
 
 _random_start_positions = set()
 
+
+def _position_signature(board: chess.Board):
+    """Identify the visible/legal position without move counters."""
+    return (board.board_fen(), board.turn, board.castling_xfen(), board.ep_square)
+
 MATERIAL_VALUES = {
     chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
     chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0,
@@ -36,14 +41,24 @@ def new_randomized_game(rng=None, min_plies: int = 6, max_plies: int = 16) -> ch
             if board.is_game_over(claim_draw=True):
                 break
             board.push(rng.choice(list(board.legal_moves)))
-        position = board.fen()
+        position = _position_signature(board)
         if (board.turn == chess.WHITE and not board.is_game_over(claim_draw=True)
                 and position not in _random_start_positions):
             _random_start_positions.add(position)
             return board
-    # A fresh random walk is overwhelmingly likely to be unique; this bounded
-    # fallback keeps the UI responsive if a test injects a deterministic RNG.
-    return board
+    fallback_rng = random.SystemRandom()
+    while True:
+        board = chess.Board()
+        target_plies = fallback_rng.randrange(min_plies, max_plies + 1, 2)
+        for _ in range(target_plies):
+            if board.is_game_over(claim_draw=True):
+                break
+            board.push(fallback_rng.choice(list(board.legal_moves)))
+        position = _position_signature(board)
+        if (board.turn == chess.WHITE and not board.is_game_over(claim_draw=True)
+                and position not in _random_start_positions):
+            _random_start_positions.add(position)
+            return board
 
 
 def new_random_reachable_position(rng=None, min_plies: int = 14,
@@ -59,12 +74,24 @@ def new_random_reachable_position(rng=None, min_plies: int = 14,
             if board.is_game_over(claim_draw=True):
                 break
             board.push(rng.choice(list(board.legal_moves)))
-        position = board.fen()
+        position = _position_signature(board)
         if (len(board.piece_map()) >= 10 and not board.is_game_over(claim_draw=True)
                 and position not in _random_start_positions):
             _random_start_positions.add(position)
             return board
-    return board
+    fallback_rng = random.SystemRandom()
+    while True:
+        board = chess.Board()
+        target_plies = fallback_rng.randint(min_plies, max_plies)
+        for _ in range(target_plies):
+            if board.is_game_over(claim_draw=True):
+                break
+            board.push(fallback_rng.choice(list(board.legal_moves)))
+        position = _position_signature(board)
+        if (len(board.piece_map()) >= 10 and not board.is_game_over(claim_draw=True)
+                and position not in _random_start_positions):
+            _random_start_positions.add(position)
+            return board
 
 
 def legal_targets(board: chess.Board, from_square: chess.Square,

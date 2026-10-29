@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pygame
 import chess
-from ai import analyze_candidates, choose_varied_candidate
+from ai import StockfishSession, choose_varied_candidate
 from comparison_ai import SearchCancelled, run_comparison, search_position
 from game_logic import (legal_targets as game_legal_targets, material_balance, new_game,
                         new_randomized_game, new_random_reachable_position,
@@ -100,7 +100,12 @@ PIECE_GLYPHS = {
     (chess.BLACK, chess.BISHOP): "♝", (chess.BLACK, chess.KNIGHT): "♞", (chess.BLACK, chess.PAWN): "♟"}
 PIECE_FONTS = {}
 def board_pixel_size(width, height):
-    return max(200, min(620, height - 155, width - 400))
+    return max(200, min(620, height - 230, width - 400))
+
+
+def play_history_rows(height):
+    moves_top = 145 + 465
+    return max(1, min(7, (height - 38 - (moves_top + 30)) // 20))
 
 
 def draw_chessboard(board, left, top, board_size, targets=(), selected=None, candidate_moves=()):
@@ -153,6 +158,8 @@ selected_square = None
 legal_targets = []
 engine_busy = False
 engine_queue = queue.Queue()
+stockfish_session = None
+stockfish_session_lock = threading.Lock()
 game_message = "Your move — White to play."
 minimax_busy = False
 minimax_queue = queue.Queue()
@@ -703,19 +710,19 @@ def draw_play_screen(w, h):
     history = san_history(game_board)
     pairs = [(idx, history[idx], history[idx + 1] if idx + 1 < len(history) else None)
              for idx in range(0, len(history), 2)]
-    start = max(0, len(pairs) - 7 - history_scroll)
+    visible_rows = play_history_rows(h)
+    start = max(0, len(pairs) - visible_rows - history_scroll)
     end = max(start, len(pairs) - history_scroll)
     for row, (idx, white_move, black_move) in enumerate(pairs[start:end]):
         line = f"{idx // 2 + 1}. {white_move}" + (f"   {black_move}" if black_move else "")
         draw_text(screen, line, panel_x, moves_top + 30 + row * 20, SMALL,
                   GOLD if idx + (1 if black_move else 0) == len(history) - 1 else MUTED)
-    draw_text(screen, "Space or click Minimax to let the algorithm play White.", panel_x, min(h - 22, moves_top + 180), TINY, MUTED)
 
 
 def draw_match_screen(w, h):
     global buttons
     buttons = {}
-    draw_text(screen, "LIVE MINIMAX SEARCH PLAYBACK", 22, 15, TITLE)
+    draw_text(screen, "LIVE SEARCH PLAYBACK", 22, 15, TITLE)
     draw_text(screen, f"Depth {MATCH_DEPTH} • legal moves previewed first; both searches animate concurrently",
               24, 49, SMALL, MUTED)
     button("dashboard", pygame.Rect(w - 495, 18, 150, 35), "Analysis dashboard")
@@ -815,21 +822,41 @@ def draw_match_screen(w, h):
             label = f"{ply_index // 2 + 1}. " if ply_index % 2 == 0 else "   "
             draw_text(screen, label + move, board_x, history_top + 23 + row * 18,
                       TINY, GOLD if row == min(7, len(history) - 1) else TEXT)
+def get_stockfish_session():
+    global stockfish_session
+    with stockfish_session_lock:
+        if stockfish_session is None:
+            stockfish_session = StockfishSession()
+        return stockfish_session
+
+
+def close_stockfish_session():
+    global stockfish_session
+    with stockfish_session_lock:
+        session, stockfish_session = stockfish_session, None
+    if session:
+        session.close()
+
+
 def request_engine_move():
     global engine_busy, game_message, engine_thread
     engine_busy = True
     depth = SIMULATION_DEPTH if simulation_active else stockfish_depth
+    variation_tolerance = 250 if simulation_active else 180
+    candidate_count = 4 if simulation_active else 2
     game_message = (f"Simulation running: Stockfish is searching at depth {depth}…"
                     if simulation_active else "Stockfish is thinking…")
     snapshot = game_board.copy(stack=True)
     def task():
         try:
-            candidates = analyze_candidates(snapshot, depth=depth, multipv=4)
-            chosen = choose_varied_candidate(candidates)
+            candidates = get_stockfish_session().analyze_candidates(
+                snapshot, depth=depth, multipv=candidate_count)
+            chosen = choose_varied_candidate(candidates, tolerance_cp=variation_tolerance)
             if chosen:
                 candidates = [chosen] + [candidate for candidate in candidates if candidate is not chosen]
             engine_queue.put(("ok", candidates))
         except Exception as exc:
+            close_stockfish_session()
             engine_queue.put(("error", str(exc)))
     engine_thread = threading.Thread(target=task, daemon=False)
     engine_thread.start()
@@ -895,10 +922,10 @@ def main():
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and mode == "play":
                 start_minimax_turn()
             elif event.type == pygame.MOUSEWHEEL and mode == "play":
-                max_scroll = max(0, (len(game_board.move_stack) + 1) // 2 - 9)
+                max_scroll = max(0, (len(game_board.move_stack) + 1) // 2 - play_history_rows(screen.get_height()))
                 history_scroll = max(0, min(max_scroll, history_scroll - event.y))
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5) and mode == "play":
-                max_scroll = max(0, (len(game_board.move_stack) + 1) // 2 - 9)
+                max_scroll = max(0, (len(game_board.move_stack) + 1) // 2 - play_history_rows(screen.get_height()))
                 history_scroll = max(0, min(max_scroll, history_scroll + (1 if event.button == 4 else -1)))
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if mode == "compare" and result:
@@ -974,16 +1001,16 @@ def main():
                                 game_message = (f"Simulating to a real result: Stockfish plays both sides "
                                                f"at depth {SIMULATION_DEPTH}.")
                                 request_engine_move()
-                        elif key == "menu" and not engine_busy and not minimax_busy and not busy:
+                        elif key == "menu" and not engine_busy and not minimax_busy and not busy and not simulation_active:
                             mode = "menu"
                             selected_square, legal_targets = None, []
-                        elif key == "new" and not engine_busy and not minimax_busy:
+                        elif key == "new" and not engine_busy and not minimax_busy and not simulation_active:
                             simulation_active = False
                             game_board = new_randomized_game(_position_random)
                             selected_square, legal_targets = None, []
                             minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                             game_message = "Fresh randomized opening — White to play."
-                        elif key == "undo" and game_board.move_stack and not engine_busy and not minimax_busy:
+                        elif key == "undo" and game_board.move_stack and not engine_busy and not minimax_busy and not simulation_active:
                             undo_last_turn(game_board)
                             selected_square, legal_targets = None, []
                             minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
@@ -995,9 +1022,10 @@ def main():
                         elif key == "run" and not busy:
                             start_comparison()
                         elif key == "reset" and not busy:
+                            comparison_board, comparison_name = new_comparison_position()
                             result = None
                             tree_selection = None
-                            message = f"Reset comparison view at {comparison_name}."
+                            message = f"Fresh randomized position ready: {comparison_name}."
                         elif key == "midgame" and not busy:
                             comparison_board, comparison_name = new_comparison_position()
                             result = None
@@ -1252,6 +1280,7 @@ def main():
         minimax_thread.join()
     if engine_thread and engine_thread.is_alive():
         engine_thread.join()
+    close_stockfish_session()
     pygame.quit()
 
 
