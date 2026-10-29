@@ -10,8 +10,8 @@ import chess
 from ai import StockfishSession, choose_varied_candidate
 from comparison_ai import SearchCancelled, run_comparison, search_position
 from game_logic import (legal_targets as game_legal_targets, material_balance, new_game,
-                        new_random_endgame_position, new_randomized_game,
-                        play_human_move, san_history, undo_last_turn)
+                        new_random_endgame_position, play_human_move, san_history,
+                        undo_last_turn)
 
 WIDTH, HEIGHT = 1440, 900
 MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT = 1120, 720
@@ -85,6 +85,8 @@ match_thread = None
 match_cancel = None
 match_pending_acks = []
 match_ack_release_at = 0.0
+match_started_at = None
+match_elapsed_seconds = 0.0
 match_start_ply = 0
 match_preview_active = False
 match_preview_groups = []
@@ -239,7 +241,7 @@ def move_preview_message(groups, index):
 
 
 def start_parallel_games():
-    global match_running, match_message, match_boards, match_game_board, match_stats, match_cancel, match_thread, comparison_view, match_active_algorithm, match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_done_ack
+    global match_running, match_message, match_boards, match_game_board, match_stats, match_cancel, match_thread, comparison_view, match_active_algorithm, match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_done_ack, match_started_at, match_elapsed_seconds
     if match_running or busy:
         return
     comparison_view = "match"
@@ -265,6 +267,8 @@ def start_parallel_games():
     cancel_event = match_cancel
     depth_snapshot = MATCH_DEPTH
     match_running = True
+    match_started_at = time.perf_counter()
+    match_elapsed_seconds = 0.0
     match_message = f"New {comparison_name}: {len(match_game_board.piece_map())} pieces • depth {depth_snapshot}. Previewing legal moves first."
 
     def task():
@@ -363,7 +367,9 @@ def stop_parallel_games():
 
 
 def reset_parallel_games():
-    global match_boards, match_game_board, match_stats, match_message, match_active_algorithm, match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_done_ack
+    global match_boards, match_game_board, match_stats, match_message, match_active_algorithm, match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_done_ack, match_started_at, match_elapsed_seconds
+    match_started_at = None
+    match_elapsed_seconds = 0.0
     match_game_board = comparison_board.copy(stack=True)
     match_start_ply = match_game_board.ply()
     match_boards = {"minimax": match_game_board.copy(stack=True),
@@ -757,6 +763,9 @@ def draw_match_screen(w, h):
                  + match_stats.get(key, {}).get("current", (0, 0, 0, 0, 0.0))[tuple_index]
             for key in ("minimax", "alpha_beta")
         }
+    match_game_elapsed = (max(0.0, time.perf_counter() - match_started_at)
+                          if match_running and match_started_at is not None
+                          else match_elapsed_seconds)
     for index, (key, title, accent) in enumerate((
             ("minimax", "PLAIN MINIMAX", BLUE), ("alpha_beta", "ALPHA-BETA", GREEN))):
         panel = pygame.Rect(margin + index * (panel_w + gap), top, panel_w, panel_h)
@@ -809,11 +818,11 @@ def draw_match_screen(w, h):
         live_wall_time = stats.get("wall_time", 0.0) + (current_elapsed if match_running else 0.0)
         draw_text(screen, fit(f"Total search time: {live_wall_time:.1f}s", TINY, info_w),
                   info_x, board_y + 314, TINY, MUTED)
-        draw_text(screen, f"Search time {live_wall_time:.1f}s", board_x,
+        draw_text(screen, f"Game elapsed {match_game_elapsed:.1f}s", board_x,
                   board_y + board_size + 7, TINY, MUTED)
         time_bar = pygame.Rect(board_x, board_y + board_size + 25, board_size, 9)
         pygame.draw.rect(screen, PANEL2, time_bar, border_radius=5)
-        time_fill = int(time_bar.width * min(1.0, live_wall_time / 60.0))
+        time_fill = int(time_bar.width * min(1.0, match_game_elapsed / 60.0))
         if time_fill:
             pygame.draw.rect(screen, accent,
                              pygame.Rect(time_bar.x, time_bar.y, max(5, time_fill), time_bar.height),
@@ -909,7 +918,7 @@ def main():
     global search_depth, result, busy, message, mode, screen, game_board, selected_square, legal_targets, engine_busy, game_message
     global selected_difficulty, stockfish_depth, simulation_active
     global comparison_board, comparison_name, tree_selection, history_scroll
-    global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_acks, match_ack_release_at
+    global comparison_view, match_running, match_message, match_game_board, match_boards, match_active_algorithm, match_cursor_bounds, match_pending_acks, match_ack_release_at, match_started_at, match_elapsed_seconds
     global match_start_ply, match_preview_active, match_preview_groups, match_preview_index, match_preview_next_at, match_preview_done_ack
     global minimax_busy, minimax_cancel, minimax_result, minimax_candidates, minimax_root_fen, minimax_apply_at, minimax_progress, minimax_thread
     running = True
@@ -950,9 +959,9 @@ def main():
                             stockfish_depth = DIFFICULTY_DEPTHS[selected_difficulty]
                             simulation_active = False
                             mode = "play"
-                            game_board = new_randomized_game(_position_random)
+                            game_board = new_game()
                             history_scroll = 0
-                            game_message = "Fresh randomized opening — White to play."
+                            game_message = "Your move — White to play."
                             minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
                         elif key == "difficulty_back":
                             mode = "menu"
@@ -1011,10 +1020,10 @@ def main():
                             selected_square, legal_targets = None, []
                         elif key == "new" and not engine_busy and not minimax_busy and not simulation_active:
                             simulation_active = False
-                            game_board = new_randomized_game(_position_random)
+                            game_board = new_game()
                             selected_square, legal_targets = None, []
                             minimax_result, minimax_candidates, minimax_apply_at = None, [], 0.0
-                            game_message = "Fresh randomized opening — White to play."
+                            game_message = "New game — White to play."
                         elif key == "undo" and game_board.move_stack and not engine_busy and not minimax_busy and not simulation_active:
                             undo_last_turn(game_board)
                             selected_square, legal_targets = None, []
@@ -1202,6 +1211,9 @@ def main():
                 match_message = f"Both searches completed. {san} advances the shared game; they now search the next position."
             elif status == "match_done":
                 match_running = False
+                match_elapsed_seconds = (max(0.0, time.perf_counter() - match_started_at)
+                                         if match_started_at is not None else match_elapsed_seconds)
+                match_started_at = None
                 match_preview_active = False
                 outcome, termination = payload
                 match_boards = {key: match_game_board.copy(stack=True) for key in ("minimax", "alpha_beta")}
@@ -1223,12 +1235,18 @@ def main():
                                  f" Both searches reached the result.{faster} Totals are final.")
             elif status == "match_cancelled":
                 match_running = False
+                match_elapsed_seconds = (max(0.0, time.perf_counter() - match_started_at)
+                                         if match_started_at is not None else match_elapsed_seconds)
+                match_started_at = None
                 match_preview_active = False
                 match_active_algorithm = None
                 match_searching_algorithms.clear()
                 match_message = "Games stopped. Partial games and accumulated statistics are retained."
             elif status == "match_error":
                 match_running = False
+                match_elapsed_seconds = (max(0.0, time.perf_counter() - match_started_at)
+                                         if match_started_at is not None else match_elapsed_seconds)
+                match_started_at = None
                 match_preview_active = False
                 match_active_algorithm = None
                 match_message = f"Game search error: {payload}"

@@ -3,7 +3,7 @@ import random
 import chess
 from ai import choose_varied_candidate
 
-from game_logic import (legal_targets, material_balance, new_game, new_randomized_game,
+from game_logic import (legal_targets, material_balance, new_game,
                         new_random_endgame_position, play_human_move, san_history,
                         undo_last_turn)
 
@@ -27,10 +27,6 @@ def main():
     assert undo_last_turn(board) == 1
     assert board.fen() == chess.STARTING_FEN
     assert new_game().fen() == chess.STARTING_FEN
-    random_opening_a, random_opening_b = new_randomized_game(), new_randomized_game()
-    assert random_opening_a.is_valid() and random_opening_b.is_valid()
-    assert random_opening_a.turn == chess.WHITE and random_opening_b.turn == chess.WHITE
-    assert random_opening_a.fen() != random_opening_b.fen()
     random_endgame_a = new_random_endgame_position()
     random_endgame_b = new_random_endgame_position()
     for endgame in (random_endgame_a, random_endgame_b):
@@ -49,7 +45,7 @@ def main():
                 for seed in range(20)}
     assert selected == {"A", "B"}
     assert choose_varied_candidate([]) is None
-    print("PASS: legal move helpers, fresh randomized starts, near-best Stockfish variation, SAN history, and undo.")
+    print("PASS: standard chess starts, legal move helpers, random engine choice, SAN history, and undo.")
 
 
 if __name__ == "__main__":

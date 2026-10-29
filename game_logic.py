@@ -20,47 +20,6 @@ def new_game() -> chess.Board:
     return chess.Board()
 
 
-def new_randomized_game(rng=None, min_plies: int = 6, max_plies: int = 16) -> chess.Board:
-    """Create a fresh, legal opening position with White to move.
-
-    A short random legal opening keeps the game familiar while giving each new
-    game a different board and move history. The ordinary ``new_game`` helper
-    remains the standard initial position for callers and tests that need it.
-    """
-    rng = rng or random.SystemRandom()
-    min_plies = max(2, int(min_plies))
-    max_plies = max(min_plies, int(max_plies))
-    min_plies += min_plies % 2
-    max_plies -= max_plies % 2
-    if max_plies < min_plies:
-        max_plies = min_plies
-    for _ in range(100):
-        board = chess.Board()
-        target_plies = rng.randrange(min_plies, max_plies + 1, 2)
-        for _ in range(target_plies):
-            if board.is_game_over(claim_draw=True):
-                break
-            board.push(rng.choice(list(board.legal_moves)))
-        position = _position_signature(board)
-        if (board.turn == chess.WHITE and not board.is_game_over(claim_draw=True)
-                and position not in _random_start_positions):
-            _random_start_positions.add(position)
-            return board
-    fallback_rng = random.SystemRandom()
-    while True:
-        board = chess.Board()
-        target_plies = fallback_rng.randrange(min_plies, max_plies + 1, 2)
-        for _ in range(target_plies):
-            if board.is_game_over(claim_draw=True):
-                break
-            board.push(fallback_rng.choice(list(board.legal_moves)))
-        position = _position_signature(board)
-        if (board.turn == chess.WHITE and not board.is_game_over(claim_draw=True)
-                and position not in _random_start_positions):
-            _random_start_positions.add(position)
-            return board
-
-
 def new_random_endgame_position(rng=None, max_plies: int = 250) -> chess.Board:
     """Play random legal games until a fresh, natural 5–6 piece endgame appears."""
     rng = rng or random.SystemRandom()
